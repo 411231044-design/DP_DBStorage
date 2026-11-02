@@ -125,6 +125,10 @@ std::string Db::exec(const std::string& sql) {
     return "";
 }
 
+int Db::changes() {
+    return ok() ? api().changes(handle_) : -1;
+}
+
 bool Db::query(const std::string& sql, std::vector<std::vector<Cell>>& rows) {
     if (!ok()) {
         last_error_ = "база не открыта";

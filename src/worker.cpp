@@ -17,6 +17,7 @@
 #include "store.hpp"
 #include "restore.hpp"
 #include "streams.hpp"
+#include "commands.hpp"
 #include "validate.hpp"
 #include "db_mariadb.hpp"
 
@@ -380,8 +381,12 @@ void worker_main(DbConfig cfg, Paths paths) {
             const std::string cache = paths.profiles + "\\dpdb_cache";
             cache_push(*client, cache);
             shadow_players_from(*client, cache + "\\players.db");
+            CommandEnv env{cfg.mode, cache + "\\players.db", paths.profiles};
+            poll_commands(*client, env);
         } else {
             step_shadows(*client, paths);
+            CommandEnv env{cfg.mode, paths.players_db, paths.profiles};
+            poll_commands(*client, env);
         }
         // предзагрузка слоёв восстановления: миссия стартует позже ON_LOAD,
         // к её OnInit кэш уже тёплый; при пустой базе слой = 0 сущностей

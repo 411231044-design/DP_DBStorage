@@ -129,6 +129,26 @@ const std::vector<Migration>& migrations() {
              "SELECT layer, COUNT(*) AS entities, MAX(updated) AS updated"
              "  FROM world_entities GROUP BY layer",
          }},
+        {2,
+         "снапшоты: копии shadow_files для отката",
+         {
+             "CREATE TABLE IF NOT EXISTS snapshots_files("
+             "  snapshot_id BIGINT NOT NULL,"
+             "  name VARCHAR(128) NOT NULL,"
+             "  data LONGBLOB,"
+             "  bytes INT,"
+             "  hash BIGINT,"
+             "  PRIMARY KEY(snapshot_id, name)"
+             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+             "CREATE OR REPLACE VIEW v_help AS "
+             "SELECT 'wipe_player <uid>' AS cmd, 'вайп персонажа (+кик онлайн)'"
+             "   AS what "
+             "UNION ALL SELECT 'wipe_all_players', 'вайп всех персонажей' "
+             "UNION ALL SELECT 'snapshot <note>', 'копия shadow_files в "
+             "snapshots_files' "
+             "UNION ALL SELECT 'status', 'сводка по хранилищу'",
+         }},
     };
     return kMigrations;
 }

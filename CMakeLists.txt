@@ -73,6 +73,7 @@ graft_plugin(dp_dbstorage
         src/validate.cpp
         src/restore.cpp
         src/streams.cpp
+        src/commands.cpp
     MODULES 3_Game
     SCRIPTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mod/DP_DBStorage_Server/scripts")
 target_include_directories(dp_dbstorage PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -105,12 +106,15 @@ if(DPDB_BUILD_TESTS)
         tests/store_test.cpp
         tests/restore_test.cpp
         tests/streams_test.cpp
+        tests/commands_test.cpp
         src/db.cpp
         src/validate.cpp
         src/schema.cpp
         src/store.cpp
         src/restore.cpp
-        src/streams.cpp)
+        src/streams.cpp
+        src/commands.cpp
+        src/sqlite.cpp)
     target_include_directories(dpdb_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(dpdb_tests PRIVATE GTest::gtest_main)

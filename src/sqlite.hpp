@@ -37,6 +37,9 @@ public:
     // Один оператор без результата: "", либо ошибка.
     std::string exec(const std::string& sql);
 
+    // Сколько строк затронул последний exec (DELETE/UPDATE/INSERT).
+    int changes();
+
     // SELECT: строки из текстовых/blob колонок. false — ошибка (см. last_error).
     bool query(const std::string& sql, std::vector<std::vector<Cell>>& rows);
 

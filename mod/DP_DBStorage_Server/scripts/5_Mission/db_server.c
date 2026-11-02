@@ -15,9 +15,44 @@
 
 class DbApi
 {
+	static ref map<string, PlayerIdentity> s_Online = new map<string, PlayerIdentity>;
+
 	static void Log(string s)
 	{
 		Print("[DP_DBStorage] " + s);
+	}
+
+	static string TrimTail(string s)
+	{
+		while (s.Length() > 0)
+		{
+			string last = s.Substring(s.Length() - 1, 1);
+			if (last == "\r" || last == "\n" || last == " " || last == "\t")
+				s = s.Substring(0, s.Length() - 1);
+			else
+				break;
+		}
+		return s;
+	}
+
+	// кик по uid или '*' = все онлайн (флаг пишет плагин после вайпа)
+	static void KickUid(string uid)
+	{
+		if (uid == "*")
+		{
+			for (int i = 0; i < s_Online.Count(); i++)
+			{
+				string key = s_Online.GetKey(i);
+				Log("kick *: " + key);
+				GetGame().DisconnectPlayer(s_Online.Get(key), key);
+			}
+			return;
+		}
+		if (s_Online.Contains(uid))
+		{
+			Log("kick (вайпнут онлайн): " + uid);
+			GetGame().DisconnectPlayer(s_Online.Get(uid), uid);
+		}
 	}
 
 	// Слот предмета в компактном виде для восстановления (фаза 2):
@@ -531,10 +566,31 @@ class DbManager
 			worldSec = 300;
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.SavePlayers, playerSec * 1000, true);
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.WorldCycle, worldSec * 1000, true);
+		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.ProcessKickFile, 5000, true);
 		if (streams)
 			DbApi.Log("manager: streams — persistence нативный, снимки: игрок каждые " + playerSec.ToString() + "с, мир каждые " + worldSec.ToString() + "с; " + DbVersion());
 		else
 			DbApi.Log("manager: player every " + playerSec.ToString() + "s, world every " + worldSec.ToString() + "s; " + DbVersion());
+	}
+
+	// кик-флаг от плагина (после wipe_player/wipe_all_players из mysql-клиента)
+	void ProcessKickFile()
+	{
+		string path = "$profile:dp_db_kick.txt";
+		if (!FileExist(path))
+			return;
+		FileHandle f = OpenFile(path, FileMode.READ);
+		if (f == 0)
+			return;
+		string line;
+		while (FGets(f, line) > 0)
+		{
+			line = DbApi.TrimTail(line);
+			if (line.Length() > 0 && line.Substring(0, 1) != "#")
+				DbApi.KickUid(line);
+		}
+		CloseFile(f);
+		DeleteFile(path);
 	}
 
 	void SavePlayers()
@@ -586,6 +642,7 @@ modded class MissionServer
 		super.InvokeOnConnect(player, identity);
 		if (player && identity)
 		{
+			DbApi.s_Online.Set(identity.GetId(), identity);
 			DbApi.SavePlayer(player);
 			if (!m_DbStreams)
 			{
@@ -597,6 +654,8 @@ modded class MissionServer
 
 	override void InvokeOnDisconnect(PlayerBase player)
 	{
+		if (player && player.GetIdentity())
+			DbApi.s_Online.Remove(player.GetIdentity().GetId());
 		if (player)
 			DbApi.SavePlayer(player);
 		super.InvokeOnDisconnect(player);

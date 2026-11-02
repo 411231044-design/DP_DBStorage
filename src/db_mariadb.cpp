@@ -106,6 +106,7 @@ public:
             return fail(mysql_error(mysql_));
         MYSQL_FIELD* fields = mysql_fetch_fields(res);
         const unsigned n = mysql_num_fields(res);
+        out.clear();   // вызывающие переиспользуют вектор — дописывать нельзя
         while (MYSQL_ROW row = mysql_fetch_row(res)) {
             unsigned long* lens = mysql_fetch_lengths(res);
             out.emplace_back();
