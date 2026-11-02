@@ -28,7 +28,7 @@ import random
 import shutil
 import subprocess
 import sys
-import tempfile
+import time
 from collections import Counter, defaultdict
 
 DEFAULTS = dict(host="127.0.0.1", port=3311, user="dpstorage",
@@ -314,6 +314,14 @@ def main():
     ap.add_argument("--db"), ap.add_argument("--client", help="путь к mysql/mariadb-клиенту")
     ap.add_argument("--out", default="out/panels", help="куда писать HTML (по умолчанию out/panels)")
     ap.add_argument("--no-open", action="store_true", help="не открывать браузер")
+    ap.add_argument("--serve", action="store_true",
+                    help="живой режим: локальный веб-сервер, панели актуальны сами")
+    ap.add_argument("--bind", default="127.0.0.1",
+                    help="адрес живого режима (по умолчанию только localhost)")
+    ap.add_argument("--http", dest="http_port", type=int, default=8788,
+                    help="порт живого режима (по умолчанию 8788)")
+    ap.add_argument("--refresh", type=int, default=5,
+                    help="живой режим: период обновления страницы, секунд (по умолчанию 5)")
     a = ap.parse_args()
 
     conn = dict(DEFAULTS)
@@ -332,6 +340,12 @@ def main():
             conn[k] = v
 
     db = Db(find_client(a.client), conn)
+
+    if a.serve:
+        serve(db, conn, bind=a.bind, port=a.http_port, refresh=a.refresh,
+              no_open=a.no_open)
+        return
+
     d = fetch(db)
     import datetime
     d["extra"].update(user=conn["user"], host=conn["host"], port=conn["port"],
@@ -352,6 +366,100 @@ def main():
     if not a.no_open:
         os.startfile(dash)   # noqa: Windows only — как и весь мод
         os.startfile(panel)
+
+
+# ── живой режим (intime) ─────────────────────────────────────────────────────
+# ЗАЧЕМ: разовые панели — снимок; администратору нужно окно, которое всегда
+# показывает «сейчас». --serve поднимает localhost-сервер (stdlib http.server):
+# каждая загрузка страницы строит панели заново из базы, страница сама
+# обновляется каждые --refresh секунд. Свежее данных в базе быть не может:
+# плагин пишет их циклами sync_period_sec/world_save_sec — период обновления
+# тоньше этих циклов не имеет смысла.
+
+def serve(db, conn, bind, port, refresh, no_open):
+    import datetime
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    lock = threading.Lock()          # mysql-клиент — по одному запросу за раз
+    cache = {}                       # путь → (время сборки, html)
+
+    def snapshot():
+        d = fetch(db)
+        d["extra"].update(user=conn["user"], host=conn["host"],
+                          port=conn["port"],
+                          ts=datetime.datetime.now().strftime("%H:%M:%S"))
+        return d
+
+    def live_html(page):
+        with lock:
+            built, html = cache.get(page, (0, ""))
+            fresh = max(1, min(refresh, 2))   # не чаще раза в 1-2 с
+            if time.time() - built > fresh:
+                d = snapshot()
+                html = (build_dashboard(d) if page == "dashboard"
+                        else build_dbpanel(d))
+                stamp = ("живой режим: обновление каждые %d с · снимок от %s"
+                         % (refresh, d["extra"]["ts"]))
+                html = html.replace(
+                    "<head>",
+                    '<head><meta http-equiv="refresh" content="%d">' % refresh, 1)
+                html = html.replace(
+                    "<body>",
+                    '<body><p class="sm" style="margin:0 0 6px">%s</p>' % stamp, 1)
+                cache[page] = (time.time(), html)
+        return html.encode("utf-8")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, fmt_, *args):
+            pass   # каждый refresh не логировать
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self.send_response(302)
+                self.send_header("Location", "/dashboard.html")
+                self.end_headers()
+                return
+            if self.path == "/dashboard.html":
+                body = live_html("dashboard")
+                mime = "text/html; charset=utf-8"
+            elif self.path == "/dbpanel.html":
+                body = live_html("dbpanel")
+                mime = "text/html; charset=utf-8"
+            elif self.path == "/status.json":
+                with lock:
+                    d = snapshot()
+                body = json.dumps({
+                    "updated": d["extra"]["ts"],
+                    "entities_total": d["total"],
+                    "layers": d["counts"],
+                    "items": int(d["extra"]["items"]),
+                    "streams": int(d["extra"]["streams"]),
+                    "streams_bytes": int(d["extra"]["bytes"]),
+                    "players": int(d["extra"]["players"]),
+                }, ensure_ascii=False).encode("utf-8")
+                mime = "application/json; charset=utf-8"
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer((bind, port), H)
+    url = "http://%s:%d/" % (bind, port)
+    print("живой режим: %s (обновление %d с; Ctrl+C — стоп)" % (url, refresh))
+    if not no_open:
+        import webbrowser
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nостановлено")
 
 
 if __name__ == "__main__":
