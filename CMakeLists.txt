@@ -87,6 +87,7 @@ target_link_libraries(dp_dbstorage PRIVATE mariadbclient ws2_32 shlwapi crypt32 
 
 # ── Юнит-тесты без игры (gtest, только движко-независимые источники) ─────────
 if(DPDB_BUILD_TESTS)
+    enable_testing()
     FetchContent_Declare(googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG        v1.15.2

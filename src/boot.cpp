@@ -183,36 +183,15 @@ void boot_streams(const Paths& paths, const DbConfig& cfg) {
     else if (mig_log.find("актуальна") == std::string::npos)
         log_line("streams: схема: " + mig_log);
 
-    // 1) кэш-барьер: слои из СУБД (только отсутствующие в кэше файлы)
+    // 1) кэш-барьер: всё из СУБД (только отсутствующие в кэше файлы) —
+    // включая players.db: в streams он живёт в кэше, настоящий путь движку
+    // не нужен вовсе
     std::string err;
     const int pulled = cache_pull(*client, cache_dir, err);
     if (pulled < 0)
         log_line("streams: кэш не прочитан: " + err + " — продолжаем с тем, что есть");
 
-    // 2) players.db: движок ждёт его в настоящем storage; восстановить из
-    //    СУБД, если файла нет (запись целиком — та же таблица shadow_files)
-    if (GetFileAttributesA(paths.players_db.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::vector<DbRow> rows;
-        if (client->query(
-                std::format("SELECT data FROM shadow_files WHERE name = 'players.db'"),
-                rows) &&
-            !rows.empty()) {
-            if (const auto* blob = std::get_if<Blob>(&rows.front().cols[0]);
-                blob && !blob->empty()) {
-                mkdirs_local(paths.players_db.substr(
-                    0, paths.players_db.find_last_of('\\')));
-                std::ofstream f(paths.players_db, std::ios::binary);
-                if (f) {
-                    f.write(reinterpret_cast<const char*>(blob->data()),
-                            static_cast<std::streamsize>(blob->size()));
-                    log_line("streams: players.db восстановлен из СУБД (" +
-                             std::to_string(blob->size()) + " байт)");
-                }
-            }
-        }
-    }
-
-    // 3) перенаправление: storage_<id>\... → кэш. Подкаталоги кэша — заранее:
+    // 2) перенаправление: storage_<id>\... → кэш. Подкаталоги кэша — заранее:
     // движок зовёт CreateFileW без создания каталогов (каталоги он делает по
     // настоящему пути, который мы не трогаем).
     mkdirs_local(cache_dir + "\\data");
