@@ -13,19 +13,37 @@ C++-плагин `DP_DBStorage.grafted.dll` вызывается из Enforce-с
 
 ## Архитектура
 
+Два режима persistence (config `mode`):
+
+**`streams` (основной)** — подмена файлового слоя persistence СУБД. IAT-слоты
+файловых функций образа движка (`CreateFileW`/`DeleteFileW`/`MoveFileExW`/
+`GetFileAttributesW`/`SetFileAttributesW`/`CreateDirectoryW`, `fopen`)
+перенаправляют пути `storage_<id>` в одноразовый кэш
+`$profile\dpdb_cache`; кэш синхронизируется с MariaDB (таблица `shadow_files`,
+FNV-хеш дедуп): на буте — недостающие файлы из СУБД (до первого обращения
+движка), дальше воркер пушит изменения каждые `sync_period_sec`. Движок
+полностью нативен: offlineDB/players.db, счётчики CE, «существующий мир»,
+InitialSpawn гасится сам (при восстановленном мире `respawned:0`). Настоящий
+`storage_<id>` не создаётся вовсе. При недоступной СУБД на старте — отказ от
+перенаправления, движок работает с обычными файлами.
+
+```
+движок (CreateFileW …)            кэш $profile\dpdb_cache        MariaDB
+   storage_<id>\…  ──IAT-redirect──►  data\*.bin, players.db ──воркер──► shadow_files
+   чтение при старте ◄── cache_pull (только отсутствующие) ◄────────────┘
+```
+
+**`takeover`** — скриптовая полная декомпозиция: DbPlayerSaver/DbWorldSaver
+(решётка + инвентарь) пишут построчные таблицы, DbRestorer спавнит мир из БД,
+CE-хуки гасят бут-раскладку. Оставлен как слой читаемости и запасной путь.
+
 ```
 Enforce (мод)                     C++ плагин (graft native)         MariaDB
 ──────────────                    ─────────────────────────         ───────
 DbPlayerSaver  ──нативы-батчи──►  staging → очередь (coalesce) ──► воркер ──► SQL
 DbWorldSaver   (решётка+инвентарь)                                  (транзакции)
-MissionServer  ◄──флаг-файлы─────  db_commands (вайпы/кики, фаза 3)
+MissionServer  ◄──нативы-чтение──  restore-кэш (слои, игроки по запросу)
 ```
-
-- Всё игровое — на сим-потоке; сеть/диск MariaDB — в фоновом воркере.
-- Режим `takeover`: на `GRAFT_ON_LOAD` (до чтения persistence движком) слои
-  `storage_1/data` и строки `players.db` стираются — истина только в MariaDB.
-- Теневые BLOB (байты players.db / файлов слоёв) пишутся рядом — аварийный
-  откат, если script-API не покрыл какое-то поле (см. docs/fidelity.md, фаза 1).
 
 ## Конфиг `$profile:dp_dbstorage.cfg`
 
@@ -35,7 +53,7 @@ port = 3306
 user = dpstorage
 password = секрет
 database = dp_storage
-mode = takeover        # takeover | mirror
+mode = streams         # streams | takeover | mirror
 sync_period_sec = 30
 player_save_sec = 60
 world_save_sec = 300
@@ -54,7 +72,10 @@ cmake --build --preset tests; ctest --preset tests
 
 ## Статус
 
-- Фаза 0 (каркас): сборка, схема/миграции, воркер, теневые BLOB, takeover-чистка.
-- Фаза 1: Enforce-обходчики (игрок, мир) — в работе.
-- Фаза 2: восстановление из MariaDB на буте/коннекте.
-- Фаза 3: db_commands (вайпы/кики/снапшоты).
+- `streams`: E2E на DayZServer 1.30 — посев (20890 лута) → кэш убит → рестарт
+  из MariaDB → 28 слоёв восстановлено нативно, `Initially (re)spawned:0`,
+  настоящий storage не создан, 32 файла/3.6 МБ в СУБД.
+- `takeover`: E2E — 21 964 сущности построчно, восстановление спавном,
+  теневые BLOB; прочие режимы — как слои поверх.
+- Хвосты: сохранение игрока живым клиентом, db_commands (вайпы/кики), справка
+  по fidelity script-API (`takeover`).

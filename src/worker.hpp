@@ -37,6 +37,7 @@ struct WorkerState {
     std::uint64_t cycles = 0;
     DbConfig cfg;
     Paths paths;
+    std::string cache_dir;              // режим streams: profiles\dpdb_cache
 };
 WorkerState& worker_state();
 
@@ -44,5 +45,11 @@ WorkerState& worker_state();
 // (drain очереди, тени, сердцебиение). Запуск — start_worker (detach).
 void worker_main(DbConfig cfg, Paths paths);
 void start_worker(DbConfig cfg, Paths paths);
+
+// Правда к моменту CE-бут-прохода: есть ли в MariaDB данные мира. Решает,
+// пропускать ли раскладку лута движком (мир восстановим сами) или дать ей
+// сработать (честно свежий сервер). Атомик: пишет воркер, читает детур.
+bool db_has_world();
+void set_db_has_world(bool yes);
 
 }  // namespace dpdb

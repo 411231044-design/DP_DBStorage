@@ -1,23 +1,32 @@
 #include "boot.hpp"
 
+#define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <format>
 #include <fstream>
 
+#include "graft/engine.hpp"
+#include "graft/scan.hpp"
+
 #include "db.hpp"
+#include "db_mariadb.hpp"
+#include "schema.hpp"
 #include "sqlite.hpp"
+#include "streams.hpp"
 #include "worker.hpp"
 
 namespace dpdb::boot {
 
 namespace {
 
-// Группы файлов слоёв в storage_1/data (маппинг DP_Storage): всё, что движок
-// восстанавливает при старте. В takeover-режиме это мусор — истина в MariaDB.
+// Группы файлов ЖИВЫХ слоёв в storage_<id>/data — то, что восстанавливаем из
+// MariaDB сами. types.*/doors.* СОЗНАТЕЛЬНО не трогаем: счётчики CE и состояния
+// дверей остаются движку — по ним же он видит «существующий мир» и после хука
+// globals не раскладывает бут-лут поверх нашего восстановления.
 const char* kLayerGroups[] = {
-    "dynamic_*", "vehicles.*", "zombies.*", "animals.*",
-    "doors.*",   "types.*",    "events.*",  "building*",
+    "dynamic_*", "vehicles.*", "zombies.*", "animals.*", "building*", "events.*",
 };
 
 int delete_by_group(const std::string& dir, const char* group) {
@@ -75,6 +84,151 @@ DbConfig load_config(const Paths& paths) {
     return r.cfg;
 }
 
+void mkdirs_local(const std::string& dir) {
+    std::string cur;
+    for (std::size_t i = 0; i < dir.size(); ++i) {
+        cur += dir[i];
+        const bool sep = dir[i] == '\\' || dir[i] == '/';
+        const bool last = i + 1 == dir.size();
+        if ((sep || last) && cur.size() > 3)
+            CreateDirectoryA(
+                cur.substr(0, cur.size() - (last && !sep ? 0 : 1)).c_str(),
+                nullptr);
+    }
+}
+
+// ── CE: бут-раскладка лута не дублирует наш мир ─────────────────────────────
+// Два хука (якоря и сигнатуры — порт DP_Storage, проверены на проде 1.30):
+//   1) загрузчик globals.xml ("RespawnTypes"): RestartSpawn [obj+0x6c] = 0;
+//   2) ВХОД нативного initial-прохода ("Initial Spawn is DISABLED"): если в
+//      MariaDB есть мир — вызов движка пропускается целиком (мир восстановим
+//      сами из БД); на честно свежем сервере (БД пуста) — раскладка работает.
+using CeGlobalsApply = unsigned char (*)(void*, void*);
+CeGlobalsApply g_ceGlobalsOrig = nullptr;
+
+unsigned char CeGlobalsDetour(void* self, void* table) {
+    const unsigned char r = g_ceGlobalsOrig(self, table);
+    const auto obj = reinterpret_cast<std::uintptr_t>(self);
+    if (graft::scan::readable(reinterpret_cast<void*>(obj + 0x6c), 4))
+        *reinterpret_cast<int*>(obj + 0x6c) = 0;
+    return r;
+}
+
+bool CeGlobalsHookInstall() {
+    const auto fn = graft::scan::function_referencing("RespawnTypes");
+    if (!fn)
+        return false;
+    if (!graft::scan::matches(*fn,
+            graft::scan::sig<"48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 "
+                             "48 8B CF">))
+        return false;
+    return graft::hook(reinterpret_cast<void*>(*fn),
+                       reinterpret_cast<void*>(&CeGlobalsDetour),
+                       reinterpret_cast<void**>(&g_ceGlobalsOrig));
+}
+
+using CeInitialEntry = void (*)(void*, void*);
+CeInitialEntry g_ceInitialOrig = nullptr;
+long g_ceInitialSkipped = 0;   // сколько раз раскладка пропущена (для лога)
+
+void CeInitialDetour(void* self, void* ctx) {
+    if (db_has_world()) {
+        ++g_ceInitialSkipped;
+        return;   // мир восстановим из MariaDB — раскладку движка не зовём
+    }
+    g_ceInitialOrig(self, ctx);
+}
+
+bool CeInitialHookInstall() {
+    const auto fn = graft::scan::function_referencing(
+        "[CE][LootRespawner] (%s) :: Initial Spawn is DISABLED");
+    if (!fn)
+        return false;
+    if (!graft::scan::matches(*fn,
+            graft::scan::sig<"48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 "
+                             "E8 [rel32] 4C 8B 40 70">))
+        return false;
+    return graft::hook(reinterpret_cast<void*>(*fn),
+                       reinterpret_cast<void*>(&CeInitialDetour),
+                       reinterpret_cast<void**>(&g_ceInitialOrig));
+}
+
+// ── режим streams: persistence движка живёт в MariaDB ────────────────────────
+// IAT-слот fopen движка переписывает пути storage_<id> в одноразовый кэш
+// (profiles\dpdb_cache). Кэш наполняется из СУБД синхронно, ДО первого fopen
+// движка; дальше воркер пушит изменения кэша и players.db в СУБД. Движок
+// нативен во всём: CE-счётчики, «существующий мир», раскладки — никаких хуков
+// поведения не нужно.
+void boot_streams(const Paths& paths, const DbConfig& cfg) {
+    if (!paths.resolved) {
+        log_line("streams: миссия не найдена — перенаправление не включаем");
+        return;
+    }
+    const std::string cache_dir = paths.profiles + "\\dpdb_cache";
+
+    auto client = make_mariadb_client(cfg);
+    if (!client->reconnect()) {
+        log_line("streams: СУБД недоступна (" + client->error() +
+                 ") — отказ: движок работает с настоящим storage");
+        return;
+    }
+    {
+        auto& st = worker_state();
+        std::lock_guard<std::mutex> lk(st.mx);
+        st.server_info = client->server_info();
+    }
+    std::string mig_log;
+    if (!apply_migrations(*client, mig_log))
+        log_line("streams: схема: " + mig_log);
+    else if (mig_log.find("актуальна") == std::string::npos)
+        log_line("streams: схема: " + mig_log);
+
+    // 1) кэш-барьер: слои из СУБД (только отсутствующие в кэше файлы)
+    std::string err;
+    const int pulled = cache_pull(*client, cache_dir, err);
+    if (pulled < 0)
+        log_line("streams: кэш не прочитан: " + err + " — продолжаем с тем, что есть");
+
+    // 2) players.db: движок ждёт его в настоящем storage; восстановить из
+    //    СУБД, если файла нет (запись целиком — та же таблица shadow_files)
+    if (GetFileAttributesA(paths.players_db.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::vector<DbRow> rows;
+        if (client->query(
+                std::format("SELECT data FROM shadow_files WHERE name = 'players.db'"),
+                rows) &&
+            !rows.empty()) {
+            if (const auto* blob = std::get_if<Blob>(&rows.front().cols[0]);
+                blob && !blob->empty()) {
+                mkdirs_local(paths.players_db.substr(
+                    0, paths.players_db.find_last_of('\\')));
+                std::ofstream f(paths.players_db, std::ios::binary);
+                if (f) {
+                    f.write(reinterpret_cast<const char*>(blob->data()),
+                            static_cast<std::streamsize>(blob->size()));
+                    log_line("streams: players.db восстановлен из СУБД (" +
+                             std::to_string(blob->size()) + " байт)");
+                }
+            }
+        }
+    }
+
+    // 3) перенаправление: storage_<id>\... → кэш. Подкаталоги кэша — заранее:
+    // движок зовёт CreateFileW без создания каталогов (каталоги он делает по
+    // настоящему пути, который мы не трогаем).
+    mkdirs_local(cache_dir + "\\data");
+    mkdirs_local(cache_dir + "\\export");
+    fopen_redirect_set(paths.storage, cache_dir);
+    const int slots = fopen_iat_install();
+    if (slots > 0)
+        log_line(std::format(
+            "streams: IAT fopen запатчен ({} слотов), кэш: {} файлов из СУБД; "
+            "storage движка: {}",
+            slots, std::max(pulled, 0), cache_dir));
+    else
+        log_line("streams: слотов fopen не найдено — перенаправление НЕ "
+                 "работает, движок с настоящим storage");
+}
+
 }  // namespace
 
 void at_load() {
@@ -96,8 +250,29 @@ void at_load() {
         "конфиг: {}@{}:{}/{} mode={} sync={}с", cfg.user, cfg.host, cfg.port,
         cfg.database, cfg.mode, cfg.sync_period_sec));
 
-    if (cfg.mode == "takeover")
+    if (cfg.mode == "streams") {
+        {
+            auto& st = worker_state();
+            std::lock_guard<std::mutex> lk(st.mx);
+            st.cache_dir = paths.profiles + "\\dpdb_cache";
+        }
+        set_diag_logger([](const std::string& s) { log_line(s); });
+        boot_streams(paths, cfg);   // барьер кэша до первого fopen движка
+    } else if (cfg.mode == "takeover") {
         takeover_wipe(paths);
+        // врезка законна только из ON_LOAD (движок ещё без потоков)
+        if (CeGlobalsHookInstall())
+            log_line("CE: хук globals стоит, RestartSpawn будет = 0");
+        else
+            log_line("CE: хук globals НЕ встал (сигнатура?) — бут-лут "
+                     "контролирует только initial-хук");
+        if (CeInitialHookInstall())
+            log_line("CE: хук initial стоит — раскладка пропускается, когда в "
+                     "MariaDB есть мир");
+        else
+            log_line("CE: хук initial НЕ встал — при восстановлении возможен "
+                     "двойной бут-лут");
+    }
 
     start_worker(cfg, paths);
 }

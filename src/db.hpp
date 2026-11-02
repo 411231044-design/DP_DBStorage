@@ -22,7 +22,8 @@ struct DbConfig {
     std::string user = "dpstorage";
     std::string password;
     std::string database = "dp_storage";
-    std::string mode = "takeover";   // takeover | mirror (mirror — только зеркало)
+    std::string mode = "streams";    // streams | takeover | mirror: streams —
+                                     // IAT-перенаправление persistence в СУБД
     int sync_period_sec = 30;        // период воркера: тени/команды/сердцебиение
     int player_save_sec = 60;        // периодика снимка онлайн-игроков (скрипт)
     int world_save_sec = 300;        // периодика снимка мира (скрипт)

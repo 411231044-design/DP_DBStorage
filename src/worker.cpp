@@ -15,6 +15,8 @@
 #include "schema.hpp"
 #include "sqlite.hpp"
 #include "store.hpp"
+#include "restore.hpp"
+#include "streams.hpp"
 #include "validate.hpp"
 #include "db_mariadb.hpp"
 
@@ -244,6 +246,44 @@ void step_shadows(DbClient& db, const Paths& paths) {
 
 }  // namespace
 
+// Материализация бухгалтерии CE из теней: types.*/doors.* обязаны лежать в
+// storage_<id>/data ДО чтения persistence — по ним движок видит «существующий
+// мир» (ветка RestartSpawn, а не InitialSpawn). Пропадают они при форс-килле
+// (движок не успел сохранить) — восстанавливаем байты из MariaDB.
+void materialize_ce_files(DbClient& db, const Paths& paths) {
+    if (!paths.resolved || paths.data_dir.empty())
+        return;
+    std::vector<DbRow> rows;
+    if (!db.query("SELECT name, data FROM shadow_files", rows))
+        return;
+    int restored = 0;
+    for (const auto& r : rows) {
+        if (r.cols.size() < 2)
+            continue;
+        const auto* name = std::get_if<std::string>(&r.cols[0]);
+        const auto* data = std::get_if<Blob>(&r.cols[1]);
+        if (!name || !data || data->empty())
+            continue;
+        const std::string base = name->substr(0, name->find('.'));
+        if (base != "types" && base != "doors")
+            continue;
+        const std::string path = join_path(paths.data_dir, *name);
+        if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            continue;   // файл есть — не трогаем
+        std::ofstream f(path, std::ios::binary);
+        if (!f)
+            continue;
+        f.write(reinterpret_cast<const char*>(data->data()),
+                static_cast<std::streamsize>(data->size()));
+        ++restored;
+    }
+    if (restored)
+        log_line(std::format(
+            "восстановление: материализовано файлов CE из теней: {} "
+            "(существующий мир, InitialSpawn не сработает)",
+            restored));
+}
+
 Paths resolve_paths() {
     Paths p;
     p.exe_dir = exe_dir();
@@ -277,6 +317,18 @@ void log_line(const std::string& msg) {
 WorkerState& worker_state() {
     static WorkerState st;
     return st;
+}
+
+namespace {
+std::atomic<bool> g_db_has_world{false};
+}
+
+bool db_has_world() {
+    return g_db_has_world.load(std::memory_order_relaxed);
+}
+
+void set_db_has_world(bool yes) {
+    g_db_has_world.store(yes, std::memory_order_relaxed);
 }
 
 void worker_main(DbConfig cfg, Paths paths) {
@@ -319,7 +371,44 @@ void worker_main(DbConfig cfg, Paths paths) {
 
         set_phase("ready");
         store().drain(*client, report);
-        step_shadows(*client, paths);
+        if (cfg.mode == "streams") {
+            // кэш перенаправленных слоёв + players.db целиком — в СУБД
+            cache_push(*client, paths.profiles + "\\dpdb_cache");
+            file_push(*client, paths.players_db, "players.db");
+        } else {
+            step_shadows(*client, paths);
+        }
+        // предзагрузка слоёв восстановления: миссия стартует позже ON_LOAD,
+        // к её OnInit кэш уже тёплый; при пустой базе слой = 0 сущностей
+        if (restore().cached_layers() == 0) {
+            materialize_ce_files(*client, paths);
+            for (const auto layer : {"dynamic", "vehicles", "zombies",
+                                     "animals", "buildings", "stashes",
+                                     "events"}) {
+                std::string lerr;
+                if (!restore().load_layer(*client, layer, lerr))
+                    log_line("восстановление: " + lerr);
+            }
+            log_line(std::format("восстановление: кэш {} слоёв",
+                                 restore().cached_layers()));
+            std::uint64_t total = 0;
+            for (const auto layer : {"dynamic", "vehicles", "zombies",
+                                     "animals", "buildings", "stashes",
+                                     "events"})
+                total += std::max(0, restore().count(layer));
+            set_db_has_world(total > 0);
+            log_line(std::format("восстановление: мир в БД = {} сущностей "
+                                 "({} бут-раскладку CE)",
+                                 total, total > 0 ? "пропускаем" : "оставляем"));
+        }
+        // запросы персонажей от скрипта (коннект игрока)
+        std::string uid_req;
+        while (restore().has_request(uid_req)) {
+            std::string perr;
+            const int rc = restore().load_player(*client, uid_req, perr);
+            if (rc < 0)
+                log_line("восстановление игрок " + uid_req + ": " + perr);
+        }
         client->exec(
             "REPLACE INTO server_meta(k, v) VALUES('heartbeat', NOW())");
         {

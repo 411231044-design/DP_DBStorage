@@ -14,7 +14,7 @@ TEST(Config, DefaultsOnEmpty) {
     EXPECT_EQ(r.cfg.user, "dpstorage");
     EXPECT_EQ(r.cfg.password, "");
     EXPECT_EQ(r.cfg.database, "dp_storage");
-    EXPECT_EQ(r.cfg.mode, "takeover");
+    EXPECT_EQ(r.cfg.mode, "streams");
     EXPECT_EQ(r.cfg.sync_period_sec, 30);
     EXPECT_EQ(r.cfg.player_save_sec, 60);
     EXPECT_EQ(r.cfg.world_save_sec, 300);

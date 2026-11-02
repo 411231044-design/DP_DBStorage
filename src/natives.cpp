@@ -8,13 +8,24 @@
 
 #include "db.hpp"
 #include "db_mariadb.hpp"
+#include "restore.hpp"
 #include "sqlite.hpp"
+#include "streams.hpp"
 #include "store.hpp"
 #include "worker.hpp"
 
 namespace {
 
 using namespace dpdb;
+
+// Режим плагина: streams — persistence движка перенаправлен в MariaDB
+// (восстановление нативное, скриптовые рестореры не нужны), takeover/mirror —
+// скриптовые сохранение/восстановление.
+std::string DbModeText() {
+    auto& st = worker_state();
+    std::lock_guard<std::mutex> lk(st.mx);
+    return st.cfg.mode + (fopen_redirect_active() ? " (IAT активен)" : "");
+}
 
 // ── диагностика ──────────────────────────────────────────────────────────────
 
@@ -34,11 +45,13 @@ std::string DbStatus() {
     const auto stats = store().stats();
     std::lock_guard<std::mutex> lk(st.mx);
     return std::format(
-        "phase={}, cycles={}, pending: players={} worlds={}; "
-        "flushed: players={} worlds={} items={} failed={}; item_errors={}",
-        st.phase, st.cycles, store().pending_players(), store().pending_worlds(),
-        stats.players, stats.worlds, stats.items, stats.failed,
-        stats.item_errors) +
+        "phase={}, cycles={}, redirects={} createfile_storage={}; pending: "
+        "players={} worlds={}; flushed: players={} worlds={} items={} "
+        "failed={}; item_errors={}",
+        st.phase, st.cycles, fopen_redirect_count(),
+        createfile_storage_hits(), store().pending_players(),
+        store().pending_worlds(), stats.players, stats.worlds, stats.items,
+        stats.failed, stats.item_errors) +
         (stats.last_item_error.empty()
              ? std::string()
              : " [" + stats.last_item_error + "]") +
@@ -136,11 +149,49 @@ int DbConfigValue(std::string_view key) {
     return -1;
 }
 
+// ── восстановление: строки из кэша (сеть — только в воркере) ─────────────────
+// Слой: DbRestoreCount → -1 = не готов (скрипт повторяет позже); сущности и
+// предметы — TAB-упакованные строки (Split("\t")).
+
+int DbRestoreCount(std::string_view layer) {
+    return restore().count(layer);
+}
+
+std::string DbRestoreEntity(std::string_view layer, int index) {
+    return restore().entity(layer, index);
+}
+
+int DbRestoreItemsCount(std::string_view layer, int index) {
+    return restore().items_count(layer, index);
+}
+
+std::string DbRestoreItem(std::string_view layer, int index, int item_idx) {
+    return restore().item(layer, index, item_idx);
+}
+
+// Игрок: запрос уходит воркеру, готовность — опросом ("" = ждём, "MISS" = нет).
+void DbPlayerRequest(std::string_view uid) {
+    restore().request_player(uid);
+}
+
+std::string DbPlayerLoad(std::string_view uid) {
+    return restore().player(uid);
+}
+
+int DbPlayerItemsCount(std::string_view uid) {
+    return restore().player_items_count(uid);
+}
+
+std::string DbPlayerLoadItem(std::string_view uid, int item_idx) {
+    return restore().player_item(uid, item_idx);
+}
+
 }  // namespace
 
 GRAFT_BINDINGS("3_Game") {
     bind.global<&DbVersion>("DbVersion");
     bind.global<&DbStatus>("DbStatus");
+    bind.global<&DbModeText>("DbModeText");
     bind.global<&DbConfigValue>("DbConfigValue", "key");
 
     bind.global<&DbPlayerBegin>(
@@ -161,4 +212,14 @@ GRAFT_BINDINGS("3_Game") {
         "handle, parent, slot, type, health, quantity, ammo, liquid_type, "
         "liquid_vol, food_stage, wetness, temperature, extra");
     bind.global<&DbWorldEnd>("DbWorldEnd");
+
+    bind.global<&DbRestoreCount>("DbRestoreCount", "layer");
+    bind.global<&DbRestoreEntity>("DbRestoreEntity", "layer, index");
+    bind.global<&DbRestoreItemsCount>("DbRestoreItemsCount", "layer, index");
+    bind.global<&DbRestoreItem>("DbRestoreItem", "layer, index, item");
+
+    bind.global<&DbPlayerRequest>("DbPlayerRequest", "uid");
+    bind.global<&DbPlayerLoad>("DbPlayerLoad", "uid");
+    bind.global<&DbPlayerItemsCount>("DbPlayerItemsCount", "uid");
+    bind.global<&DbPlayerLoadItem>("DbPlayerLoadItem", "uid, item");
 }

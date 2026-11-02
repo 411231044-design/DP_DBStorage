@@ -93,12 +93,13 @@ ConfigResult parse_config(std::string_view text) {
         } else if (key == "database") {
             c.database = val;
         } else if (key == "mode") {
-            if (val == "takeover" || val == "mirror")
+            if (val == "streams" || val == "takeover" || val == "mirror")
                 c.mode = val;
             else {
                 r.ok = false;
-                r.error = "конфиг: mode — takeover или mirror, получено «" +
-                          std::string(val) + "»";
+                r.error =
+                    "конфиг: mode — streams, takeover или mirror, получено «" +
+                    std::string(val) + "»";
                 return r;
             }
         } else if (key == "sync_period_sec") {

@@ -252,6 +252,258 @@ class DbWorldScan
 	}
 };
 
+// ── восстановление ───────────────────────────────────────────────────────────
+// Форматы packed-строк (TAB, Split("\t")) — restore.cpp: сущность
+// type/x/y/z/yaw/pitch/roll/health; предмет parent/slot/type/health/quantity/
+// ammo/liquid_type/liquid_vol/food_stage/wetness/temperature/extra; слот:
+// S<slotId> аттач, C<row>_<col> карго, H руки, "" корень.
+
+class DbRestorer
+{
+	static ref DbRestorer s_Active;
+
+	static const int PER_TICK = 100;   // сущностей за тик: спавн дороже дампа
+
+	ref array<string> m_Layers;
+	int m_LayerI = 0;
+	int m_EntI = 0;
+	int m_Spawned = 0;
+	int m_Items = 0;
+	int m_Failed = 0;
+	bool m_Done = false;
+
+	void DbRestorer()
+	{
+		m_Layers = new array<string>;
+		m_Layers.Insert("dynamic");
+		m_Layers.Insert("vehicles");
+		m_Layers.Insert("zombies");
+		m_Layers.Insert("animals");
+		m_Layers.Insert("buildings");
+		m_Layers.Insert("stashes");
+		m_Layers.Insert("events");
+		s_Active = this;
+		DbApi.Log("restore begin: слоёв=" + m_Layers.Count().ToString());
+		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.Work, 500, true);
+	}
+
+	static bool IsRunning()
+	{
+		return s_Active && !s_Active.m_Done;
+	}
+
+	// Состояние предмета (quantity/патроны/жидкость/мокрость/температура).
+	static void ApplyItemState(EntityAI item, array<string> f)
+	{
+		ItemBase ib = ItemBase.Cast(item);
+		if (ib)
+		{
+			if (f.Get(4).ToFloat() >= 0)
+				ib.SetQuantity(f.Get(4).ToFloat());
+			if (f.Get(6).ToInt() > 0 && f.Get(7).ToFloat() >= 0)
+			{
+				ib.SetLiquidType(f.Get(6).ToInt());
+				ib.SetQuantity(f.Get(7).ToFloat());
+			}
+			if (f.Get(9).ToFloat() >= 0)
+				ib.SetWet(f.Get(9).ToFloat());
+		}
+		Magazine mg = Magazine.Cast(item);
+		if (mg && f.Get(5).ToInt() >= 0)
+			mg.ServerSetAmmoCount(f.Get(5).ToInt());
+		item.SetHealth("", "", f.Get(3).ToFloat());
+	}
+
+	// Размещение предмета в дереве: byIdx — уже восстановленные предметы узла.
+	// Точный слот — InventoryLocation + LocationSyncMoveEntity (API 1.30;
+	// TakeEntityToTargetInventory ищет слот сам, нам нужен конкретный).
+	// Возвращает placed EntityAI или null.
+	static EntityAI PlaceItem(string packed, EntityAI root, PlayerBase forPlayer, map<int, EntityAI> byIdx, vector rootPos)
+	{
+		array<string> f = new array<string>;
+		packed.Split("\t", f);
+		if (f.Count() < 11)
+			return null;
+		EntityAI item = EntityAI.Cast(GetGame().CreateObjectEx(f.Get(2), rootPos, ECE_LOCAL));
+		if (!item)
+			return null;
+		ApplyItemState(item, f);
+		EntityAI parentEnt = root;
+		if (f.Get(0).ToInt() > 0 && byIdx.Contains(f.Get(0).ToInt()))
+			parentEnt = byIdx.Get(f.Get(0).ToInt());
+		string slot = f.Get(1);
+		if (slot == "-")
+			slot = "";   // пустые поля пакуются дефисом (Split роняет пустышки)
+		if (slot == "" || !parentEnt)
+			return item;   // корень — остаётся как создан
+		// откуда двигать: свежесозданный предмет лежит в мире
+		InventoryLocation src = new InventoryLocation();
+		if (!item.GetInventory().GetCurrentInventoryLocation(src))
+			return item;
+		InventoryLocation dst = new InventoryLocation();
+		bool made = false;
+		if (slot.Length() > 0 && slot.Substring(0, 1) == "S")
+		{
+			dst.SetAttachment(parentEnt, item, slot.Substring(1, slot.Length() - 1).ToInt());
+			made = true;
+		}
+		else if (slot == "H" && forPlayer)
+		{
+			dst.SetHands(forPlayer, item);
+			made = true;
+		}
+		else if (slot.Length() > 1 && slot.Substring(0, 1) == "C")
+		{
+			array<string> rc = new array<string>;
+			slot.Substring(1, slot.Length() - 1).Split("_", rc);
+			if (rc.Count() >= 2)
+			{
+				dst.SetCargo(parentEnt, item, 0, rc.Get(0).ToInt(), rc.Get(1).ToInt(), false);
+				made = true;
+			}
+		}
+		if (made && GameInventory.LocationSyncMoveEntity(src, dst))
+			return item;
+		// слот не принял (занят/несовместим): предмет остаётся под корнем
+		DbApi.Log("restore: слот не принял " + f.Get(2) + " slot=" + slot + " — оставлен на земле");
+		return item;
+	}
+
+	void Work()
+	{
+		if (m_Done)
+			return;
+		if (m_LayerI >= m_Layers.Count())
+		{
+			m_Done = true;
+			DbApi.Log("restore done: entities=" + m_Spawned.ToString() + " items=" + m_Items.ToString() + " failed=" + m_Failed.ToString());
+			return;
+		}
+		string layer = m_Layers.Get(m_LayerI);
+		int total = DbRestoreCount(layer);
+		if (total < 0)
+			return;   // слой ещё греется в кэше воркера — ждём этот же тик-таймер
+
+		int n = 0;
+		while (n < PER_TICK && m_EntI < total)
+		{
+			string packed = DbRestoreEntity(layer, m_EntI);
+			if (packed != "")
+			{
+				array<string> f = new array<string>;
+				packed.Split("\t", f);
+				if (f.Count() >= 8)
+				{
+					EntityAI ent = EntityAI.Cast(GetGame().CreateObjectEx(f.Get(0), Vector(f.Get(1).ToFloat(), f.Get(2).ToFloat(), f.Get(3).ToFloat()), ECE_PLACE_ON_SURFACE | ECE_TRACE));
+					if (ent)
+					{
+						ent.SetOrientation(Vector(f.Get(4).ToFloat(), f.Get(5).ToFloat(), f.Get(6).ToFloat()));
+						ent.SetHealth("", "", f.Get(7).ToFloat());
+						m_Spawned++;
+						int items = DbRestoreItemsCount(layer, m_EntI);
+						if (items > 0)
+						{
+							map<int, EntityAI> byIdx = new map<int, EntityAI>;
+							for (int i = 0; i < items; i++)
+							{
+								EntityAI placed = PlaceItem(DbRestoreItem(layer, m_EntI, i), ent, null, byIdx, ent.GetPosition());
+								if (placed)
+								{
+									byIdx.Set(i + 1, placed);
+									m_Items++;
+								}
+								else
+									m_Failed++;
+							}
+						}
+					}
+					else
+						m_Failed++;
+				}
+			}
+			m_EntI++;
+			n++;
+		}
+		if (m_EntI >= total)
+		{
+			DbApi.Log("restore layer " + layer + ": " + total.ToString() + " сущностей");
+			m_LayerI++;
+			m_EntI = 0;
+		}
+	}
+};
+
+// Персонаж: запрос уходит воркеру, готовность — опросом раз в секунду.
+class DbPlayerRestore
+{
+	string m_Uid;
+	PlayerBase m_Player;
+	int m_Ticks = 0;
+
+	void DbPlayerRestore(PlayerBase player, string uid)
+	{
+		m_Player = player;
+		m_Uid = uid;
+		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.Poll, 1000, true);
+	}
+
+	void Stop()
+	{
+		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).Remove(this.Poll);
+	}
+
+	void Poll()
+	{
+		m_Ticks++;
+		string packed = DbPlayerLoad(m_Uid);
+		if (packed == "")
+		{
+			if (m_Ticks > 60)
+			{
+				DbApi.Log("restore player " + m_Uid + ": таймаут чтения из СУБД");
+				Stop();
+			}
+			return;
+		}
+		Stop();
+		if (packed == "MISS" || !m_Player)
+			return;   // свежий персонаж — движок уже создал
+		array<string> f = new array<string>;
+		packed.Split("\t", f);
+		if (f.Count() < 10 || f.Get(0).ToInt() == 0)
+			return;   // мёртвый персонаж — как свежий (рестарт-флоу движка)
+		if (!m_Player.IsAlive())
+			return;
+		m_Player.SetPosition(Vector(f.Get(1).ToFloat(), f.Get(2).ToFloat(), f.Get(3).ToFloat()));
+		m_Player.SetOrientation(Vector(f.Get(4).ToFloat(), 0, 0));
+		m_Player.SetHealth("", "Health", f.Get(5).ToFloat());
+		m_Player.SetHealth("", "Blood", f.Get(6).ToFloat());
+		if (m_Player.GetStatWater() && f.Get(7).ToFloat() >= 0)
+			m_Player.GetStatWater().Set(f.Get(7).ToFloat());
+		if (m_Player.GetStatEnergy() && f.Get(8).ToFloat() >= 0)
+			m_Player.GetStatEnergy().Set(f.Get(8).ToFloat());
+		int items = DbPlayerItemsCount(m_Uid);
+		int restored = 0;
+		if (items > 0)
+		{
+			map<int, EntityAI> byIdx = new map<int, EntityAI>;
+			for (int i = 0; i < items; i++)
+			{
+				EntityAI placed = DbRestorer.PlaceItem(DbPlayerLoadItem(m_Uid, i), m_Player, m_Player, byIdx, m_Player.GetPosition());
+				if (placed)
+				{
+					byIdx.Set(i + 1, placed);
+					restored++;
+				}
+			}
+		}
+		string pname = f.Get(9);
+		if (pname == "-")
+			pname = "?";
+		DbApi.Log("restore player " + m_Uid + " (" + pname + "): предметов=" + restored.ToString());
+	}
+};
+
 class DbManager
 {
 	static ref DbManager s_Instance;
@@ -267,6 +519,14 @@ class DbManager
 
 	void Init()
 	{
+		// streams: persistence делает сам движок (IAT-перенаправление в СУБД) —
+		// рестореры не нужны, остаются только снимки в построчные таблицы.
+		string mode = DbModeText();
+		if (mode.Length() >= 7 && mode.Substring(0, 7) == "streams")
+		{
+			DbApi.Log("manager: режим streams — persistence нативный, снимки в таблицы; " + DbVersion());
+			return;
+		}
 		int playerSec = DbConfigValue("player_save_sec");
 		if (playerSec < 10)
 			playerSec = 60;
@@ -298,6 +558,8 @@ class DbManager
 
 	void WorldCycle()
 	{
+		if (DbRestorer.IsRunning())
+			return;   // мир ещё восстанавливается — не затирать снапшот частичным
 		if (!m_Scan || m_Scan.IsDone())
 			m_Scan = new DbWorldScan();
 	}
@@ -305,17 +567,33 @@ class DbManager
 
 modded class MissionServer
 {
+	ref map<string, ref DbPlayerRestore> m_DbRestores;
+	bool m_DbStreams = false;
+
 	override void OnInit()
 	{
 		super.OnInit();
+		m_DbRestores = new map<string, ref DbPlayerRestore>;
+		string mode = DbModeText();
+		if (mode.Length() >= 7 && mode.Substring(0, 7) == "streams")
+			m_DbStreams = true;
 		DbManager.Get().Init();
+		if (!m_DbStreams)
+			new DbRestorer();
 	}
 
 	override void InvokeOnConnect(PlayerBase player, PlayerIdentity identity)
 	{
 		super.InvokeOnConnect(player, identity);
 		if (player && identity)
+		{
 			DbApi.SavePlayer(player);
+			if (!m_DbStreams)
+			{
+				DbPlayerRequest(identity.GetId());
+				m_DbRestores.Set(identity.GetId(), new DbPlayerRestore(player, identity.GetId()));
+			}
+		}
 	}
 
 	override void InvokeOnDisconnect(PlayerBase player)
