@@ -20,6 +20,7 @@
 #include "commands.hpp"
 #include "validate.hpp"
 #include "db_mariadb.hpp"
+#include "boot.hpp"
 
 namespace dpdb {
 
@@ -376,6 +377,25 @@ void worker_main(DbConfig cfg, Paths paths) {
         set_phase("ready");
         store().drain(*client, report);
         if (cfg.mode == "streams") {
+            // Redirect мог не включиться на буте (MariaDB поднялась позже
+            // сервера) — ретраим, пока движок не начал читать storage; после
+            // первой фазы Hive попытки безвредны, но и бесполезны.
+            if (!fopen_redirect_active()) {
+                static bool s_retry_logged = false;
+                if (!s_retry_logged) {
+                    std::string note;
+                    {
+                        auto& st = worker_state();
+                        std::lock_guard<std::mutex> lk(st.mx);
+                        note = st.streams_note;
+                    }
+                    log_line("streams: redirect не активен (" +
+                             (note.empty() ? "попытка включения" : note) +
+                             ") — ретраим каждый цикл");
+                    s_retry_logged = true;
+                }
+                boot::ensure_streams_redirect(paths, cfg);
+            }
             // кэш перенаправленного persistence: слои + players.db целиком
             // (cache_push берёт и корень кэша), плюс построчно uid → BLOB
             const std::string cache = paths.profiles + "\\dpdb_cache";

@@ -38,6 +38,7 @@ struct WorkerState {
     DbConfig cfg;
     Paths paths;
     std::string cache_dir;              // режим streams: profiles\dpdb_cache
+    std::string streams_note;           // почему redirect не активен ("" = активен)
 };
 WorkerState& worker_state();
 
