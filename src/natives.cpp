@@ -20,11 +20,19 @@ using namespace dpdb;
 
 // Режим плагина: streams — persistence движка перенаправлен в MariaDB
 // (восстановление нативное, скриптовые рестореры не нужны), takeover/mirror —
-// скриптовые сохранение/восстановление.
+// скриптовые сохранение/восстановление. Причина неактивного IAT видна прямо
+// здесь (см. MARIADB-DEBUG-REQUEST: молчаливый отказ искали не в том логе).
 std::string DbModeText() {
     auto& st = worker_state();
     std::lock_guard<std::mutex> lk(st.mx);
-    return st.cfg.mode + (fopen_redirect_active() ? " (IAT активен)" : "");
+    std::string out = st.cfg.mode;
+    if (st.cfg.mode == "streams")
+        out += fopen_redirect_active()
+                   ? " (IAT активен)"
+                   : " (IAT НЕ активен: " +
+                         (st.streams_note.empty() ? "нет данных" : st.streams_note) +
+                         ")";
+    return out;
 }
 
 // ── диагностика ──────────────────────────────────────────────────────────────

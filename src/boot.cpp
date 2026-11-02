@@ -159,18 +159,35 @@ bool CeInitialHookInstall() {
 // движка; дальше воркер пушит изменения кэша и players.db в СУБД. Движок
 // нативен во всём: CE-счётчики, «существующий мир», раскладки — никаких хуков
 // поведения не нужно.
-void boot_streams(const Paths& paths, const DbConfig& cfg) {
+// Возвращает true, когда перенаправление активно; каждая причина отказа
+// пишется в журнал И в worker_state().streams_note — чтобы скрипт-лог
+// (DbModeText) тоже показывал её, а не только dp_dbstorage.log.
+void set_streams_note(const std::string& s) {
+    auto& st = worker_state();
+    std::lock_guard<std::mutex> lk(st.mx);
+    st.streams_note = s;
+}
+
+bool boot_streams_try(const Paths& paths, const DbConfig& cfg, bool loud) {
     if (!paths.resolved) {
-        log_line("streams: миссия не найдена — перенаправление не включаем");
-        return;
+        const std::string why =
+            "миссия не найдена (нет -config=/template? смотрится exe\\mpmissions)";
+        if (loud) {
+            log_line("streams: " + why + " — перенаправление не включаем");
+            set_streams_note(why);
+        }
+        return false;
     }
     const std::string cache_dir = paths.profiles + "\\dpdb_cache";
 
     auto client = make_mariadb_client(cfg);
     if (!client->reconnect()) {
-        log_line("streams: СУБД недоступна (" + client->error() +
-                 ") — отказ: движок работает с настоящим storage");
-        return;
+        const std::string why = "СУБД недоступна: " + client->error();
+        if (loud) {
+            log_line("streams: " + why + " — движок работает с настоящим storage");
+            set_streams_note(why);
+        }
+        return false;
     }
     {
         auto& st = worker_state();
@@ -198,17 +215,30 @@ void boot_streams(const Paths& paths, const DbConfig& cfg) {
     mkdirs_local(cache_dir + "\\export");
     fopen_redirect_set(paths.storage, cache_dir);
     const int slots = fopen_iat_install();
-    if (slots > 0)
+    if (slots > 0) {
+        set_streams_note("");
         log_line(std::format(
             "streams: IAT fopen запатчен ({} слотов), кэш: {} файлов из СУБД; "
             "storage движка: {}",
             slots, std::max(pulled, 0), cache_dir));
-    else
-        log_line("streams: слотов fopen не найдено — перенаправление НЕ "
-                 "работает, движок с настоящим storage");
+        return true;
+    }
+    const std::string why = "IAT-слоты файловых функций не найдены (версия exe?)";
+    if (loud) {
+        log_line("streams: " + why + " — перенаправление НЕ работает, движок с "
+                 "настоящим storage");
+        set_streams_note(why);
+    }
+    return false;
 }
 
 }  // namespace
+
+bool ensure_streams_redirect(const Paths& paths, const DbConfig& cfg) {
+    if (fopen_redirect_active())
+        return true;
+    return boot_streams_try(paths, cfg, /*loud=*/true);
+}
 
 void at_load() {
     Paths paths = resolve_paths();
@@ -236,7 +266,9 @@ void at_load() {
             st.cache_dir = paths.profiles + "\\dpdb_cache";
         }
         set_diag_logger([](const std::string& s) { log_line(s); });
-        boot_streams(paths, cfg);   // барьер кэша до первого fopen движка
+        // барьер кэша до первого fopen движка; не вышло (СУБД ещё не встала?)
+        // — воркер будет ретраить, пока движок не начал читать storage
+        ensure_streams_redirect(paths, cfg);
     } else if (cfg.mode == "takeover") {
         takeover_wipe(paths);
         // врезка законна только из ON_LOAD (движок ещё без потоков)
