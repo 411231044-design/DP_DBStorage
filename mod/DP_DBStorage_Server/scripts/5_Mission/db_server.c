@@ -519,14 +519,10 @@ class DbManager
 
 	void Init()
 	{
-		// streams: persistence делает сам движок (IAT-перенаправление в СУБД) —
-		// рестореры не нужны, остаются только снимки в построчные таблицы.
+		// streams: persistence делает сам движок (IAT-перенаправление в СУБД);
+		// рестореры не нужны, но построчные снимки включаем — читаемость в MySQL.
 		string mode = DbModeText();
-		if (mode.Length() >= 7 && mode.Substring(0, 7) == "streams")
-		{
-			DbApi.Log("manager: режим streams — persistence нативный, снимки в таблицы; " + DbVersion());
-			return;
-		}
+		bool streams = mode.Length() >= 7 && mode.Substring(0, 7) == "streams";
 		int playerSec = DbConfigValue("player_save_sec");
 		if (playerSec < 10)
 			playerSec = 60;
@@ -535,7 +531,10 @@ class DbManager
 			worldSec = 300;
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.SavePlayers, playerSec * 1000, true);
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.WorldCycle, worldSec * 1000, true);
-		DbApi.Log("manager: player every " + playerSec.ToString() + "s, world every " + worldSec.ToString() + "s; " + DbVersion());
+		if (streams)
+			DbApi.Log("manager: streams — persistence нативный, снимки: игрок каждые " + playerSec.ToString() + "с, мир каждые " + worldSec.ToString() + "с; " + DbVersion());
+		else
+			DbApi.Log("manager: player every " + playerSec.ToString() + "s, world every " + worldSec.ToString() + "s; " + DbVersion());
 	}
 
 	void SavePlayers()

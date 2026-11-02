@@ -165,39 +165,42 @@ std::unordered_map<std::string, std::uint64_t> shadow_hashes(DbClient& db,
     return out;
 }
 
-void step_shadows(DbClient& db, const Paths& paths) {
-    // players.db: UID → Data (сериализация движка) — если движок её менял
-    if (!paths.players_db.empty()) {
-        sqlite::Db sdb;
-        const std::string open_err = sdb.open(paths.players_db, sqlite::kOpenReadonly);
-        if (open_err.empty()) {
-            std::vector<std::vector<sqlite::Cell>> rows;
-            if (sdb.query("SELECT UID, Data FROM Players", rows)) {
-                auto known = shadow_hashes(db, false);
-                for (const auto& row : rows) {
-                    if (row.size() < 2 || row[0].text.empty())
-                        continue;
-                    const auto& blob = row[1].blob;
-                    const std::uint64_t h =
-                        fnv1a64(blob.data(), blob.size());
-                    if (const auto it = known.find(row[0].text);
-                        it != known.end() && it->second == h)
-                        continue;
-                    if (!db.exec(std::format(
-                            "REPLACE INTO shadow_players(uid, data, bytes, hash,"
-                            " updated) VALUES ({}, {}, {}, {}, NOW())",
-                            sql_quote(row[0].text),
-                            hex_literal(blob.data(), blob.size()),
-                            blob.size(), static_cast<std::int64_t>(h))))
-                        return;   // СУБД умерла — на следующий цикл
-                }
-            } else {
-                log_line("тень players.db: query: " + sdb.last_error());
-            }
-        } else {
-            log_line("тень players.db: " + open_err);
-        }
+// players.db → shadow_players построчно (uid → движковый BLOB персонажа).
+// Работает и с настоящим файлом, и с кэшевым (режим streams): winsqlite
+// открывает базу рядом с живым движком без конфликтов (проверено DP на проде).
+void shadow_players_from(DbClient& db, const std::string& players_db_path) {
+    if (players_db_path.empty())
+        return;
+    sqlite::Db sdb;
+    const std::string open_err = sdb.open(players_db_path, sqlite::kOpenReadonly);
+    if (!open_err.empty()) {
+        log_line("тень players.db: " + open_err);
+        return;
     }
+    std::vector<std::vector<sqlite::Cell>> rows;
+    if (!sdb.query("SELECT UID, Data FROM Players", rows)) {
+        log_line("тень players.db: query: " + sdb.last_error());
+        return;
+    }
+    auto known = shadow_hashes(db, false);
+    for (const auto& row : rows) {
+        if (row.size() < 2 || row[0].text.empty())
+            continue;
+        const auto& blob = row[1].blob;
+        const std::uint64_t h = fnv1a64(blob.data(), blob.size());
+        if (const auto it = known.find(row[0].text); it != known.end() && it->second == h)
+            continue;
+        if (!db.exec(std::format(
+                "REPLACE INTO shadow_players(uid, data, bytes, hash, updated)"
+                " VALUES ({}, {}, {}, {}, NOW())",
+                sql_quote(row[0].text), hex_literal(blob.data(), blob.size()),
+                blob.size(), static_cast<std::int64_t>(h))))
+            return;   // СУБД умерла — на следующий цикл
+    }
+}
+
+void step_shadows(DbClient& db, const Paths& paths) {
+    shadow_players_from(db, paths.players_db);
     // storage_<id>/data/*.bin — байты файлов
     if (!paths.data_dir.empty()) {
         const std::string pattern = join_path(paths.data_dir, "*.bin");
@@ -372,9 +375,11 @@ void worker_main(DbConfig cfg, Paths paths) {
         set_phase("ready");
         store().drain(*client, report);
         if (cfg.mode == "streams") {
-            // кэш перенаправленных слоёв + players.db целиком — в СУБД
-            cache_push(*client, paths.profiles + "\\dpdb_cache");
-            file_push(*client, paths.players_db, "players.db");
+            // кэш перенаправленного persistence: слои + players.db целиком
+            // (cache_push берёт и корень кэша), плюс построчно uid → BLOB
+            const std::string cache = paths.profiles + "\\dpdb_cache";
+            cache_push(*client, cache);
+            shadow_players_from(*client, cache + "\\players.db");
         } else {
             step_shadows(*client, paths);
         }
