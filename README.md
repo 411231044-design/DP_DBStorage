@@ -47,10 +47,12 @@ MissionServer  ◄──нативы-чтение──  restore-кэш (сло�
 
 ## Визуализация
 
-Две панели из живой базы — одной командой (подробности: [docs/visualization.md](docs/visualization.md)):
+Две панели из живой базы — одной командой; живой режим `--serve` держит окно
+администратора всегда актуальным (подробности: [docs/visualization.md](docs/visualization.md)):
 
 ```bat
-py -3.12 tools\panels.py
+py -3.12 tools\panels.py            # разовые панели-снимки
+py -3.12 tools\panels.py --serve    # живой режим: localhost, автообновление
 ```
 
 | ![Карта мира по слоям](docs/screenshots/dashboard.png) | ![Панель данных](docs/screenshots/dbpanel.png) |
