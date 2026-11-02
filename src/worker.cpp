@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <format>
 #include <fstream>
@@ -61,35 +62,59 @@ std::string cmd_arg(const std::string& key) {
     return {};
 }
 
-// template="<миссия>" из serverDZ.cfg (первое вхождение, кавычки снимаются).
-std::string template_from_cfg(const std::string& cfg_path) {
+// Значение «key = value» из serverDZ.cfg: первое вхождение, кавычки снимаются
+// (quote != 0), иначе — до пробела/;/комментария.
+std::string cfg_value(const std::string& cfg_path, const std::string& key,
+                      char quote) {
     std::ifstream f(cfg_path);
     if (!f)
         return {};
     std::string line;
     while (std::getline(f, line)) {
-        const auto pos = line.find("template");
+        const auto pos = line.find(key);
         if (pos == std::string::npos)
             continue;
         const auto eq = line.find('=', pos);
         if (eq == std::string::npos)
             continue;
         std::string v = line.substr(eq + 1);
-        const auto q1 = v.find('"');
-        if (q1 != std::string::npos) {
-            const auto q2 = v.find('"', q1 + 1);
-            if (q2 != std::string::npos)
-                return v.substr(q1 + 1, q2 - q1 - 1);
+        if (quote) {
+            const auto q1 = v.find(quote);
+            if (q1 != std::string::npos) {
+                const auto q2 = v.find(quote, q1 + 1);
+                if (q2 != std::string::npos)
+                    return v.substr(q1 + 1, q2 - q1 - 1);
+            }
         }
-        // без кавычек: до первого пробела/;/комментария
         if (!v.empty()) {
-            const auto sp = v.find_first_of(" ;\t\r//");
+            const auto start = v.find_first_not_of(" \t");
+            if (start == std::string::npos)
+                return {};
+            v = v.substr(start);
+            const auto sp = v.find_first_of(" ;\t\r/");
             if (sp != std::string::npos)
                 v.resize(sp);
             return v;
         }
     }
     return {};
+}
+
+// template="<миссия>" из serverDZ.cfg (первое вхождение, кавычки снимаются).
+std::string template_from_cfg(const std::string& cfg_path) {
+    return cfg_value(cfg_path, "template", '"');
+}
+
+// instanceId = N (1..99): persistence живёт в storage_<N>, не всегда storage_1.
+int instance_id_from_cfg(const std::string& cfg_path) {
+    const std::string v = cfg_value(cfg_path, "instanceId", 0);
+    if (v.empty())
+        return 1;
+    int id = 1;
+    const auto [ptr, ec] = std::from_chars(v.data(), v.data() + v.size(), id);
+    if (ec != std::errc() || id < 1 || id > 99)
+        return 1;
+    return id;
 }
 
 // Текущее время «2026-11-02 13:44:05».
@@ -142,7 +167,8 @@ void step_shadows(DbClient& db, const Paths& paths) {
     // players.db: UID → Data (сериализация движка) — если движок её менял
     if (!paths.players_db.empty()) {
         sqlite::Db sdb;
-        if (sdb.open(paths.players_db, sqlite::kOpenReadonly).empty()) {
+        const std::string open_err = sdb.open(paths.players_db, sqlite::kOpenReadonly);
+        if (open_err.empty()) {
             std::vector<std::vector<sqlite::Cell>> rows;
             if (sdb.query("SELECT UID, Data FROM Players", rows)) {
                 auto known = shadow_hashes(db, false);
@@ -163,17 +189,25 @@ void step_shadows(DbClient& db, const Paths& paths) {
                             blob.size(), static_cast<std::int64_t>(h))))
                         return;   // СУБД умерла — на следующий цикл
                 }
+            } else {
+                log_line("тень players.db: query: " + sdb.last_error());
             }
+        } else {
+            log_line("тень players.db: " + open_err);
         }
     }
-    // storage_1/data/*.bin — байты файлов
+    // storage_<id>/data/*.bin — байты файлов
     if (!paths.data_dir.empty()) {
         const std::string pattern = join_path(paths.data_dir, "*.bin");
         WIN32_FIND_DATAA fd{};
         HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE)
+        if (h == INVALID_HANDLE_VALUE) {
+            log_line("тень слоёв: нет файлов по " + pattern);
             return;
+        }
         auto known = shadow_hashes(db, true);
+        int sent = 0, skipped = 0;
+        std::string first_err;
         do {
             std::ifstream f(join_path(paths.data_dir, fd.cFileName),
                             std::ios::binary);
@@ -183,19 +217,28 @@ void step_shadows(DbClient& db, const Paths& paths) {
                        std::istreambuf_iterator<char>());
             const std::uint64_t hashv = fnv1a64(bytes.data(), bytes.size());
             if (const auto it = known.find(fd.cFileName);
-                it != known.end() && it->second == hashv)
+                it != known.end() && it->second == hashv) {
+                ++skipped;
                 continue;
+            }
             if (!db.exec(std::format(
                     "REPLACE INTO shadow_files(name, data, bytes, hash, updated)"
                     " VALUES ({}, {}, {}, {}, NOW())",
                     sql_quote(fd.cFileName),
                     hex_literal(bytes.data(), bytes.size()), bytes.size(),
                     static_cast<std::int64_t>(hashv)))) {
+                if (first_err.empty())
+                    first_err = std::string(fd.cFileName) + ": " + db.error();
                 FindClose(h);
+                log_line("тень слоёв: СУБД: " + first_err);
                 return;
             }
+            ++sent;
         } while (FindNextFileA(h, &fd));
         FindClose(h);
+        if (sent || first_err.empty())
+            log_line(std::format("тень слоёв: отправлено {}, без изменений {}",
+                                 sent, skipped));
     }
 }
 
@@ -216,7 +259,8 @@ Paths resolve_paths() {
         return p;   // миссию не нашли — игроки/слои недоступны, журнал работает
     }
     p.mission = join_path(join_path(p.exe_dir, "mpmissions"), tmpl);
-    p.storage = join_path(p.mission, "storage_1");
+    const int inst = instance_id_from_cfg(join_path(p.exe_dir, cfg));
+    p.storage = join_path(p.mission, "storage_" + std::to_string(inst));
     p.data_dir = join_path(p.storage, "data");
     p.players_db = join_path(p.storage, "players.db");
     p.resolved = true;

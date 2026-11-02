@@ -181,43 +181,61 @@ std::string Store::player_end() {
     return "";
 }
 
-std::string Store::world_begin(std::string_view layer) {
-    if (!valid_layer(layer))
-        return "ERROR: unknown layer '" + std::string(layer) + "'";
+std::string Store::world_begin() {
     std::lock_guard<std::mutex> lk(mx_);
-    world_stage_.emplace();
-    world_stage_->layer = layer;
+    world_stage_open_ = true;
+    world_stage_.clear();
+    world_handles_.clear();
     return "";
 }
 
-int Store::world_entity(std::string_view type, float x, float y, float z,
-                        float yaw, float pitch, float roll, float health) {
-    if (!valid_type_name(type))
+std::string Store::world_mark(std::string_view layer) {
+    if (!valid_layer(layer))
+        return "ERROR: unknown layer '" + std::string(layer) + "'";
+    std::lock_guard<std::mutex> lk(mx_);
+    if (!world_stage_open_)
+        return "ERROR: world_mark без world_begin";
+    auto [it, inserted] = world_stage_.try_emplace(std::string(layer));
+    if (inserted)
+        it->second.layer = layer;
+    return "";
+}
+
+int Store::world_entity(std::string_view layer, std::string_view type, float x,
+                        float y, float z, float yaw, float pitch, float roll,
+                        float health) {
+    if (!valid_layer(layer) || !valid_type_name(type))
         return 0;
     const std::array<float, 7> coords = {x, y, z, yaw, pitch, roll, health};
     for (const float v : coords)
         if (!std::isfinite(v))
             return 0;
     std::lock_guard<std::mutex> lk(mx_);
-    if (!world_stage_ ||
-        static_cast<int>(world_stage_->entities.size()) >= kMaxEntities)
+    if (!world_stage_open_)
         return 0;
-    world_stage_->entities.push_back(
+    auto& snap = world_stage_[std::string(layer)];
+    snap.layer = layer;
+    if (static_cast<int>(snap.entities.size()) >= kMaxEntities)
+        return 0;
+    snap.entities.push_back(
         {std::string(type), x, y, z, yaw, pitch, roll, health, {}});
-    return static_cast<int>(world_stage_->entities.size());
+    world_handles_.emplace_back(layer,
+                                static_cast<int>(snap.entities.size()));
+    return static_cast<int>(world_handles_.size());
 }
 
-int Store::world_item(int entity, const ItemRow& row) {
+int Store::world_item(int handle, const ItemRow& row) {
     std::lock_guard<std::mutex> lk(mx_);
-    if (!world_stage_ || entity < 1 ||
-        entity > static_cast<int>(world_stage_->entities.size()))
+    if (!world_stage_open_ || handle < 1 ||
+        handle > static_cast<int>(world_handles_.size()))
         return 0;
     if (const std::string err = check_item(row); !err.empty()) {
         ++stats_.item_errors;
         stats_.last_item_error = err;
         return 0;
     }
-    auto& items = world_stage_->entities[entity - 1].items;
+    const auto& [layer, idx] = world_handles_[handle - 1];
+    auto& items = world_stage_.at(layer).entities[idx - 1].items;
     if (static_cast<int>(items.size()) >= kMaxWorldItems)
         return 0;
     items.push_back(row);
@@ -226,10 +244,13 @@ int Store::world_item(int entity, const ItemRow& row) {
 
 std::string Store::world_end() {
     std::lock_guard<std::mutex> lk(mx_);
-    if (!world_stage_)
+    if (!world_stage_open_)
         return "ERROR: world_end без world_begin";
-    world_q_[world_stage_->layer] = std::move(*world_stage_);
-    world_stage_.reset();
+    for (auto& [layer, snap] : world_stage_)
+        world_q_[layer] = std::move(snap);
+    world_stage_open_ = false;
+    world_stage_.clear();
+    world_handles_.clear();
     return "";
 }
 

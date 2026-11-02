@@ -79,18 +79,24 @@ std::string DbPlayerEnd() {
     return store().player_end();
 }
 
-// ── сохранение слоя мира: Begin → Entity+Item… → End ─────────────────────────
+// ── сохранение мира: одна сессия собирает все слои сразу (один проход
+// решётки по карте), End кладёт каждый отмеченный слой отдельным снапшотом ──
 
-std::string DbWorldBegin(std::string_view layer) {
-    return store().world_begin(layer);
+std::string DbWorldBegin() {
+    return store().world_begin();
 }
 
-int DbWorldEntity(std::string_view type, float x, float y, float z, float yaw,
-                  float pitch, float roll, float health) {
-    return store().world_entity(type, x, y, z, yaw, pitch, roll, health);
+std::string DbWorldMark(std::string_view layer) {
+    return store().world_mark(layer);
 }
 
-int DbWorldItem(int entity, int parent, std::string_view slot,
+int DbWorldEntity(std::string_view layer, std::string_view type, float x,
+                  float y, float z, float yaw, float pitch, float roll,
+                  float health) {
+    return store().world_entity(layer, type, x, y, z, yaw, pitch, roll, health);
+}
+
+int DbWorldItem(int handle, int parent, std::string_view slot,
                 std::string_view type, float health, float quantity, int ammo,
                 int liquid_type, float liquid_vol, int food_stage, float wetness,
                 float temperature, std::string_view extra) {
@@ -107,11 +113,27 @@ int DbWorldItem(int entity, int parent, std::string_view slot,
     row.food_stage = food_stage;
     row.wetness = wetness;
     row.temperature = temperature;
-    return store().world_item(entity, row);
+    return store().world_item(handle, row);
 }
 
 std::string DbWorldEnd() {
     return store().world_end();
+}
+
+// Число из конфига для скриптовых таймеров (-1 = нет такого ключа).
+int DbConfigValue(std::string_view key) {
+    auto& st = worker_state();
+    std::lock_guard<std::mutex> lk(st.mx);
+    const DbConfig& c = st.cfg;
+    if (key == "sync_period_sec")
+        return c.sync_period_sec;
+    if (key == "player_save_sec")
+        return c.player_save_sec;
+    if (key == "world_save_sec")
+        return c.world_save_sec;
+    if (key == "port")
+        return c.port;
+    return -1;
 }
 
 }  // namespace
@@ -119,6 +141,7 @@ std::string DbWorldEnd() {
 GRAFT_BINDINGS("3_Game") {
     bind.global<&DbVersion>("DbVersion");
     bind.global<&DbStatus>("DbStatus");
+    bind.global<&DbConfigValue>("DbConfigValue", "key");
 
     bind.global<&DbPlayerBegin>(
         "DbPlayerBegin",
@@ -129,12 +152,13 @@ GRAFT_BINDINGS("3_Game") {
         "food_stage, wetness, temperature, extra");
     bind.global<&DbPlayerEnd>("DbPlayerEnd");
 
-    bind.global<&DbWorldBegin>("DbWorldBegin", "layer");
-    bind.global<&DbWorldEntity>("DbWorldEntity",
-                                "type, x, y, z, yaw, pitch, roll, health");
+    bind.global<&DbWorldBegin>("DbWorldBegin");
+    bind.global<&DbWorldMark>("DbWorldMark", "layer");
+    bind.global<&DbWorldEntity>(
+        "DbWorldEntity", "layer, type, x, y, z, yaw, pitch, roll, health");
     bind.global<&DbWorldItem>(
         "DbWorldItem",
-        "entity, parent, slot, type, health, quantity, ammo, liquid_type, "
+        "handle, parent, slot, type, health, quantity, ammo, liquid_type, "
         "liquid_vol, food_stage, wetness, temperature, extra");
     bind.global<&DbWorldEnd>("DbWorldEnd");
 }

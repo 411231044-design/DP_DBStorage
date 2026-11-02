@@ -64,19 +64,34 @@ TEST(Store, PlayerCoalescesByUid) {
 
 TEST(Store, WorldFlowEndToEnd) {
     dpdb::Store s;
-    EXPECT_EQ(s.world_begin("vehicles"), "");
-    EXPECT_EQ(s.world_entity("CivilianSedan", 100, 200, 300, 90, 0, 0, 8500), 1);
+    EXPECT_EQ(s.world_begin(), "");
+    EXPECT_EQ(s.world_entity("vehicles", "CivilianSedan", 100, 200, 300, 90, 0,
+                             0, 8500),
+              1);
     EXPECT_EQ(s.world_item(1, item(0, "SparkPlug", "SparkPlug")), 1);
-    EXPECT_EQ(s.world_item(0, item(0, "", "SodaCan_Cola")), 0);  // нет сущности 0
+    // второй слой в той же сессии: handle сквозной
+    EXPECT_EQ(s.world_entity("dynamic", "SeaChest", 1, 2, 3, 0, 0, 0, 100), 2);
+    EXPECT_EQ(s.world_item(2, item(0, "", "SodaCan_Cola")), 1);
+    EXPECT_EQ(s.world_item(0, item(0, "", "SodaCan_Cola")), 0);  // нет handle 0
     EXPECT_EQ(s.world_end(), "");
-    EXPECT_EQ(s.pending_worlds(), size_t{1});
+    EXPECT_EQ(s.pending_worlds(), size_t{2});
+}
+
+TEST(Store, WorldMarkExplicitEmpty) {
+    dpdb::Store s;
+    EXPECT_EQ(s.world_begin(), "");
+    EXPECT_EQ(s.world_mark("zombies"), "");
+    EXPECT_EQ(s.world_end(), "");
+    EXPECT_EQ(s.pending_worlds(), size_t{1});   // явная пустота = стереть слой
 }
 
 TEST(Store, WorldBadLayerRejected) {
     dpdb::Store s;
-    EXPECT_NE(s.world_begin("types").find("ERROR"), std::string::npos);
-    EXPECT_EQ(s.world_entity("X", 0, 0, 0, 0, 0, 0, 0), 0);
-    EXPECT_NE(s.world_end().find("ERROR"), std::string::npos);
+    EXPECT_EQ(s.world_begin(), "");
+    EXPECT_NE(s.world_mark("types").find("ERROR"), std::string::npos);
+    EXPECT_EQ(s.world_entity("types", "X", 0, 0, 0, 0, 0, 0, 0), 0);
+    EXPECT_EQ(s.world_end(), "");
+    EXPECT_EQ(s.pending_worlds(), size_t{0});   // ничего не отметили — пусто
 }
 
 TEST(Store, ItemCap) {
@@ -115,8 +130,9 @@ TEST(Store, DrainPlayerSql) {
 
 TEST(Store, DrainWorldSqlCascade) {
     dpdb::Store s;
-    s.world_begin("vehicles");
-    s.world_entity("CivilianSedan", 1, 2, 3, 4, 5, 6, 8500);
+    s.world_begin();
+    s.world_mark("vehicles");
+    s.world_entity("vehicles", "CivilianSedan", 1, 2, 3, 4, 5, 6, 8500);
     s.world_item(1, item(0, "SparkPlug", "SparkPlug"));
     s.world_end();
 
@@ -143,7 +159,8 @@ TEST(Store, DrainWorldSqlCascade) {
 
 TEST(Store, DrainEmptyWorldLayer) {
     dpdb::Store s;
-    s.world_begin("zombies");
+    s.world_begin();
+    s.world_mark("zombies");
     s.world_end();
     dpdb::test::FakeDb db;
     std::string report;

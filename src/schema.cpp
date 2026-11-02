@@ -122,7 +122,7 @@ const std::vector<Migration>& migrations() {
              "SELECT uid, name, alive, x, y, z, health, blood, water, energy,"
              "       (SELECT COUNT(*) FROM player_items i WHERE i.uid = p.uid)"
              "         AS items,"
-             "       lastseen, created"
+             "       lastseen, created "
              "FROM players p",
 
              "CREATE OR REPLACE VIEW v_world_summary AS "
@@ -182,8 +182,9 @@ bool apply_migrations(DbClient& db, std::string& log) {
             continue;
         for (const auto& stmt : m.statements)
             if (!db.exec(stmt)) {
-                log = "миграция v" + std::to_string(m.version) + " («" +
-                      m.name + "»): " + db.error();
+                log = "миграция v" + std::to_string(m.version) + " («" + m.name +
+                      "»): " + db.error() + " [оператор: " +
+                      stmt.substr(0, 400) + "]";
                 return false;
             }
         if (!db.exec(std::format(

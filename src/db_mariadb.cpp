@@ -18,10 +18,8 @@ Val cell_to_val(const char* text, unsigned long len, enum_field_types type,
     if (!text)
         return {};   // SQL NULL
     const std::string_view s(text, len);
-    if (flags & BINARY_FLAG) {
-        Blob b(s.begin(), s.end());
-        return b;
-    }
+    // Числа парсим первыми: у числовых результатов MariaDB стоит BINARY_FLAG
+    // (все данные приезжают байтами), это не признак BLOB-колонки.
     switch (type) {
         case MYSQL_TYPE_TINY:
         case MYSQL_TYPE_SHORT:
@@ -42,8 +40,15 @@ Val cell_to_val(const char* text, unsigned long len, enum_field_types type,
             return d;
         }
         default:
-            return std::string(s);
+            break;
     }
+    // Строковые типы: BINARY_FLAG отличает настоящие байты (BLOB/VARBINARY)
+    // от текста (TEXT/VARCHAR) — у текста кодировка не бинарная.
+    if (flags & BINARY_FLAG) {
+        Blob b(s.begin(), s.end());
+        return b;
+    }
+    return std::string(s);
 }
 
 class MariaDbClient final : public DbClient {

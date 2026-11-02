@@ -55,11 +55,13 @@ public:
     int player_item(const ItemRow& row);   // 1-основанный индекс, 0 = отказ
     std::string player_end();
 
-    std::string world_begin(std::string_view layer);
-    int world_entity(std::string_view type, float x, float y, float z,
-                     float yaw, float pitch, float roll, float health);
-    int world_item(int entity, const ItemRow& row);   // индекс внутри сущности
-    std::string world_end();
+    std::string world_begin();              // одна сессия — все слои сразу
+    std::string world_mark(std::string_view layer);   // слой с 0 сущностей (явная пустота)
+    int world_entity(std::string_view layer, std::string_view type, float x,
+                     float y, float z, float yaw, float pitch, float roll,
+                     float health);        // сквозной handle для world_item
+    int world_item(int handle, const ItemRow& row);
+    std::string world_end();               // все отмеченные слои → очередь
 
     // ── воркер ──────────────────────────────────────────────────────────────
     void drain(DbClient& db, std::string& report);
@@ -79,7 +81,9 @@ private:
 
     mutable std::mutex mx_;
     std::optional<PlayerSnap> player_stage_;
-    std::optional<WorldSnap> world_stage_;
+    bool world_stage_open_ = false;
+    std::map<std::string, WorldSnap> world_stage_;   // слой → снапшот в сборе
+    std::vector<std::pair<std::string, int>> world_handles_;  // handle → (слой, idx)
     std::map<std::string, PlayerSnap> player_q_;   // coalesce: последний uid
     std::map<std::string, WorldSnap> world_q_;     // coalesce: последний слой
     Stats stats_;
