@@ -27,6 +27,8 @@ struct DbConfig {
     int sync_period_sec = 30;        // период воркера: тени/команды/сердцебиение
     int player_save_sec = 60;        // периодика снимка онлайн-игроков (скрипт)
     int world_save_sec = 300;        // периодика снимка мира (скрипт)
+    int events = 1;                  // журнал событий мира (0/1)
+    int event_retain_hours = 72;     // удержание событий, часов (0 = вечно)
 };
 
 struct ConfigResult {

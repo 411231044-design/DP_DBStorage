@@ -7,7 +7,7 @@
 
 namespace dpdb {
 
-inline constexpr int kSchemaVersion = 2;
+inline constexpr int kSchemaVersion = 3;
 
 struct Migration {
     int version;

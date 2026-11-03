@@ -345,6 +345,11 @@ void worker_main(DbConfig cfg, Paths paths) {
     }
     auto client = make_mariadb_client(cfg);
     std::string report;
+    // тяжёлый шаг — сразу (первый цикл), retention — через час
+    auto last_heavy = std::chrono::steady_clock::now() -
+                      std::chrono::hours(1);
+    auto last_retention = std::chrono::steady_clock::now() -
+                          std::chrono::hours(2);
     for (;;) {
         if (!client->connected()) {
             set_phase("connect");
@@ -375,7 +380,20 @@ void worker_main(DbConfig cfg, Paths paths) {
             log_line("схема: " + mig_log);
 
         set_phase("ready");
+        // Такт — 1 с: события мира выгружаются каждый такт (низкая латентность
+        // журнала), тяжёлое (тени/кэш/команды/сердцебиение) — раз в
+        // sync_period_sec, чтобы не крутить диск без нужды.
+        const auto now_tp = std::chrono::steady_clock::now();
+        const bool heavy =
+            now_tp - last_heavy >=
+            std::chrono::seconds(std::max(1, cfg.sync_period_sec));
+        if (heavy)
+            last_heavy = now_tp;
+
         store().drain(*client, report);
+        store().events_flush(*client);
+
+        if (heavy) {
         if (cfg.mode == "streams") {
             // Redirect мог не включиться на буте (MariaDB поднялась позже
             // сервера) — ретраим, пока движок не начал читать storage; после
@@ -407,6 +425,35 @@ void worker_main(DbConfig cfg, Paths paths) {
             step_shadows(*client, paths);
             CommandEnv env{cfg.mode, paths.players_db, paths.profiles};
             poll_commands(*client, env);
+        }
+        // удержание событий: раз в час, пачками, чтобы не держать таблицу
+        if (cfg.event_retain_hours > 0 &&
+            now_tp - last_retention >= std::chrono::hours(1)) {
+            last_retention = now_tp;
+            int deleted = 0;
+            while (client->exec(std::format(
+                       "DELETE FROM world_events WHERE id IN (SELECT id FROM "
+                       "(SELECT id FROM world_events WHERE ts < NOW() - "
+                       "INTERVAL {} HOUR LIMIT 5000) t)",
+                       cfg.event_retain_hours))) {
+                std::vector<DbRow> affected;
+                if (!client->query("SELECT ROW_COUNT()", affected))
+                    break;
+                int n = -1;
+                if (!affected.empty() && !affected.front().cols.empty())
+                    if (const auto* i =
+                            std::get_if<std::int64_t>(&affected.front().cols[0]))
+                        n = static_cast<int>(*i);
+                if (n <= 0)
+                    break;
+                deleted += n;
+                if (n < 5000)
+                    break;
+            }
+            if (deleted > 0)
+                log_line(std::format("события: удержание {}ч, удалено {}",
+                                     cfg.event_retain_hours, deleted));
+        }
         }
         // предзагрузка слоёв восстановления: миссия стартует позже ON_LOAD,
         // к её OnInit кэш уже тёплый; при пустой базе слой = 0 сущностей
@@ -448,8 +495,7 @@ void worker_main(DbConfig cfg, Paths paths) {
             st.last_error = client->error();
             ++st.cycles;
         }
-        std::this_thread::sleep_for(
-            std::chrono::seconds(std::max(1, cfg.sync_period_sec)));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 

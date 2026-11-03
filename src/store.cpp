@@ -1,5 +1,6 @@
 #include "store.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <format>
@@ -320,6 +321,65 @@ size_t Store::pending_worlds() const {
 Store::Stats Store::stats() const {
     std::lock_guard<std::mutex> lk(mx_);
     return stats_;
+}
+
+// ── события мира ─────────────────────────────────────────────────────────────
+
+bool Store::event_push(const EventRow& ev) {
+    if (ev.type.empty() || ev.type.size() > 32)
+        return false;
+    std::lock_guard<std::mutex> lk(mx_);
+    if (event_q_.size() >= static_cast<std::size_t>(kMaxEvents)) {
+        ++stats_.events_dropped;   // шум быстрее выгрузки — теряем старьё не глядя,
+        return false;              // счётчик покажет в DbStatus
+    }
+    event_q_.push_back(ev);
+    return true;
+}
+
+void Store::events_flush(DbClient& db) {
+    std::deque<EventRow> q;
+    {
+        std::lock_guard<std::mutex> lk(mx_);
+        q.swap(event_q_);
+    }
+    constexpr std::size_t kChunk = 500;
+    std::size_t done = 0;
+    for (std::size_t i = 0; i < q.size(); i += kChunk) {
+        const std::size_t n = std::min(kChunk, q.size() - i);
+        std::string ins =
+            "INSERT INTO world_events(type, uid, etype, x, y, z, payload)"
+            " VALUES ";
+        for (std::size_t j = i; j < i + n; ++j) {
+            const auto& e = q[j];
+            ins += std::format("({},{},{},{},{},{},{}){}", sql_quote(e.type),
+                               e.uid.empty() ? "NULL" : sql_quote(e.uid),
+                               e.etype.empty() ? "NULL" : sql_quote(e.etype),
+                               f(e.x), f(e.y), f(e.z),
+                               e.payload.empty() ? "NULL" : sql_quote(e.payload),
+                               j + 1 < i + n ? "," : "");
+        }
+        if (!db.exec(ins))
+            break;   // СУБД умерла: несброшенный хвост вернётся в буфер
+        done += n;
+    }
+    std::lock_guard<std::mutex> lk(mx_);
+    stats_.events += done;
+    if (done < q.size()) {
+        // порядок сохраняем: голова буфера — самое старое из невыгруженного
+        event_q_.insert(event_q_.begin(), q.begin() + static_cast<long>(done),
+                        q.end());
+        // и не копим сверх капа
+        while (event_q_.size() > static_cast<std::size_t>(kMaxEvents)) {
+            event_q_.pop_front();
+            ++stats_.events_dropped;
+        }
+    }
+}
+
+size_t Store::events_pending() const {
+    std::lock_guard<std::mutex> lk(mx_);
+    return event_q_.size();
 }
 
 Store& store() {

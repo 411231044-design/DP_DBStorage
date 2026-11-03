@@ -149,6 +149,23 @@ const std::vector<Migration>& migrations() {
              "snapshots_files' "
              "UNION ALL SELECT 'status', 'сводка по хранилищу'",
          }},
+        {3,
+         "события мира: журнал спавнов/перемещений/смертей",
+         {
+             // Журнал событий: пишется пачками из буфера плагина, читается —
+             // по (type, ts) или (uid, ts). Без FK: скорость вставки важнее.
+             "CREATE TABLE IF NOT EXISTS world_events("
+             "  id BIGINT AUTO_INCREMENT PRIMARY KEY,"
+             "  ts DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),"
+             "  type VARCHAR(32) NOT NULL,"
+             "  uid VARCHAR(64),"
+             "  etype VARCHAR(96),"
+             "  x DOUBLE, y DOUBLE, z DOUBLE,"
+             "  payload TEXT,"
+             "  KEY idx_ev_type_ts (type, ts),"
+             "  KEY idx_ev_uid_ts (uid, ts)"
+             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+         }},
     };
     return kMigrations;
 }

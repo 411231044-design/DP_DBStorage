@@ -3,6 +3,7 @@
 // безопасно, не копит расхождения с базой.
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -17,6 +18,7 @@ namespace dpdb {
 inline constexpr int kMaxPlayerItems = 4096;    // предметов на снапшот игрока
 inline constexpr int kMaxWorldItems = 512;      // предметов на сущность мира
 inline constexpr int kMaxEntities = 200000;     // сущностей на слой
+inline constexpr int kMaxEvents = 65536;        // событий в буфере (дроп-старше)
 
 // Предмет: узел дерева инвентаря. Отрицательные int/float = «нет» → NULL.
 struct ItemRow {
@@ -68,11 +70,24 @@ public:
     size_t pending_players() const;
     size_t pending_worlds() const;
 
+    // ── события мира ───────────────────────────────────────────────────────
+    // Сим-поток толкает события (true = принято; false = буфер полон —
+    // событие потеряно, счётчик дропа растёт). Воркер выгружает пачками.
+    struct EventRow {
+        std::string type, uid, etype, payload;
+        float x = 0, y = 0, z = 0;
+    };
+    bool event_push(const EventRow& ev);
+    void events_flush(DbClient& db);
+    size_t events_pending() const;
+
     struct Stats {
         std::uint64_t players = 0, worlds = 0, items = 0, failed = 0;
         std::uint64_t item_errors = 0;   // предметы, отклонённые валидацией
         std::string last_error;          // последняя ошибка записи
         std::string last_item_error;     // последний отклонённый предмет
+        std::uint64_t events = 0;        // событий записано в СУБД
+        std::uint64_t events_dropped = 0;   // не влезло в буфер
     };
     Stats stats() const;
 
@@ -86,6 +101,7 @@ private:
     std::vector<std::pair<std::string, int>> world_handles_;  // handle → (слой, idx)
     std::map<std::string, PlayerSnap> player_q_;   // coalesce: последний uid
     std::map<std::string, WorldSnap> world_q_;     // coalesce: последний слой
+    std::deque<EventRow> event_q_;                 // буфер событий мира
     Stats stats_;
 };
 
