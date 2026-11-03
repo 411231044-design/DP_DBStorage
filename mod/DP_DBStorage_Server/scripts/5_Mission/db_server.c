@@ -567,10 +567,24 @@ class DbManager
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.SavePlayers, playerSec * 1000, true);
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.WorldCycle, worldSec * 1000, true);
 		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.ProcessKickFile, 5000, true);
+		GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(this.TrackPositions, 1000, true);
 		if (streams)
 			DbApi.Log("manager: streams — persistence нативный, снимки: игрок каждые " + playerSec.ToString() + "с, мир каждые " + worldSec.ToString() + "с; " + DbVersion());
 		else
 			DbApi.Log("manager: player every " + playerSec.ToString() + "s, world every " + worldSec.ToString() + "s; " + DbVersion());
+	}
+
+	// позиции игроков: раз в секунду, событие только при дельте > 3 м
+	void TrackPositions()
+	{
+		array<Man> players = new array<Man>;
+		GetGame().GetPlayers(players);
+		for (int i = 0; i < players.Count(); i++)
+		{
+			PlayerBase pb = PlayerBase.Cast(players.Get(i));
+			if (pb && pb.GetIdentity())
+				DbEvents.PlayerPos(pb, pb.GetIdentity().GetId());
+		}
 	}
 
 	// кик-флаг от плагина (после wipe_player/wipe_all_players из mysql-клиента)
@@ -643,6 +657,7 @@ modded class MissionServer
 		if (player && identity)
 		{
 			DbApi.s_Online.Set(identity.GetId(), identity);
+			DbEvent("player_connect", identity.GetId(), "", 0, 0, 0, identity.GetName());
 			DbApi.SavePlayer(player);
 			if (!m_DbStreams)
 			{
@@ -655,7 +670,10 @@ modded class MissionServer
 	override void InvokeOnDisconnect(PlayerBase player)
 	{
 		if (player && player.GetIdentity())
+		{
 			DbApi.s_Online.Remove(player.GetIdentity().GetId());
+			DbEvent("player_disconnect", player.GetIdentity().GetId(), "", 0, 0, 0, "");
+		}
 		if (player)
 			DbApi.SavePlayer(player);
 		super.InvokeOnDisconnect(player);

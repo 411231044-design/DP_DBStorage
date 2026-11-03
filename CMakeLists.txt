@@ -106,6 +106,7 @@ if(DPDB_BUILD_TESTS)
         tests/schema_test.cpp
         tests/store_test.cpp
         tests/restore_test.cpp
+        tests/events_test.cpp
         tests/streams_test.cpp
         tests/commands_test.cpp
         src/db.cpp

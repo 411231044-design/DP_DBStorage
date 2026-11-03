@@ -152,9 +152,34 @@ int DbConfigValue(std::string_view key) {
         return c.player_save_sec;
     if (key == "world_save_sec")
         return c.world_save_sec;
+    if (key == "events")
+        return c.events;
+    if (key == "event_retain_hours")
+        return c.event_retain_hours;
     if (key == "port")
         return c.port;
     return -1;
+}
+
+// Событие мира в журнал (world_events): спавн/перемещение/смерть/коннект…
+// Возвращает 1 = принято, 0 = буфер полон или выключено (см. DbStatus).
+int DbEvent(std::string_view type, std::string_view uid, std::string_view etype,
+            float x, float y, float z, std::string_view payload) {
+    {
+        auto& st = worker_state();
+        std::lock_guard<std::mutex> lk(st.mx);
+        if (!st.cfg.events)
+            return 0;
+    }
+    dpdb::Store::EventRow ev;
+    ev.type = type;
+    ev.uid = uid;
+    ev.etype = etype;
+    ev.payload = payload;
+    ev.x = x;
+    ev.y = y;
+    ev.z = z;
+    return store().event_push(ev) ? 1 : 0;
 }
 
 // ── восстановление: строки из кэша (сеть — только в воркере) ─────────────────
@@ -201,6 +226,9 @@ GRAFT_BINDINGS("3_Game") {
     bind.global<&DbStatus>("DbStatus");
     bind.global<&DbModeText>("DbModeText");
     bind.global<&DbConfigValue>("DbConfigValue", "key");
+    bind.global<&DbEvent>(
+        "DbEvent",
+        "type, uid, etype, x, y, z, payload");
 
     bind.global<&DbPlayerBegin>(
         "DbPlayerBegin",

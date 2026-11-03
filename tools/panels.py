@@ -124,6 +124,9 @@ def fetch(db):
                          " GROUP BY type ORDER BY n DESC LIMIT 6")
     d["cmds"] = db.rows("SELECT id, cmd, status, LEFT(result,60) res"
                         " FROM db_commands ORDER BY id DESC LIMIT 4")
+    d["ev_types"] = db.rows(
+        "SELECT type, COUNT(*) n FROM world_events"
+        " WHERE ts > NOW() - INTERVAL 1 HOUR GROUP BY type ORDER BY n DESC")
     return d
 
 
@@ -295,6 +298,8 @@ __T_SUMMARY__
 __T_CMDS__
 <h3>Топ типов предметов — entity_items</h3>
 __T_TYPES__
+<h3>События мира за последний час — world_events</h3>
+__T_EVENTS__
 </div></div></div></body></html>''' \
         .replace("__CONN__", "%s@%s:%s" % (d["extra"].get("user", "dpstorage"),
                                            d["extra"].get("host", "127.0.0.1"),
@@ -303,7 +308,11 @@ __T_TYPES__
         .replace("__TREE__", tree) \
         .replace("__T_SUMMARY__", table(summary, ["layer", "entities"], (1,), ("layer",))) \
         .replace("__T_CMDS__", table(cmds, ["id", "cmd", "status", "res"], (0,), ("cmd", "res"))) \
-        .replace("__T_TYPES__", table(types, ["type", "n"], (1,), ("type",)))
+        .replace("__T_TYPES__", table(types, ["type", "n"], (1,), ("type",))) \
+        .replace("__T_EVENTS__",
+                 table([[e["type"], e["n"]] for e in d.get("ev_types", [])],
+                       ["type", "n"], (1,), ("type",))
+                 or '<div class="tr">нет событий за час</div>')
 
 
 def main():
@@ -437,6 +446,8 @@ def serve(db, conn, bind, port, refresh, no_open):
                     "streams": int(d["extra"]["streams"]),
                     "streams_bytes": int(d["extra"]["bytes"]),
                     "players": int(d["extra"]["players"]),
+                    "events_last_hour": {e["type"]: int(e["n"])
+                                         for e in d.get("ev_types", [])},
                 }, ensure_ascii=False).encode("utf-8")
                 mime = "application/json; charset=utf-8"
             else:

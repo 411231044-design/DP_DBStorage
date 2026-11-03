@@ -108,6 +108,10 @@ ConfigResult parse_config(std::string_view text) {
             known = parse_int(val, 10, 3600, c.player_save_sec);
         } else if (key == "world_save_sec") {
             known = parse_int(val, 30, 3600, c.world_save_sec);
+        } else if (key == "events") {
+            known = parse_int(val, 0, 1, c.events);
+        } else if (key == "event_retain_hours") {
+            known = parse_int(val, 0, 24 * 365, c.event_retain_hours);
         } else {
             r.ok = false;
             r.error = "конфиг: неизвестный ключ «" + key + "»";

@@ -40,6 +40,13 @@ class CfgMods
 				value = "";
 				files[] = { "DP_DBStorage_Server/scripts/3_Game" };
 			};
+			// моддинг классов мира (ItemBase/PlayerBase/зомби/животные):
+			// entity-классы живут в 4_World, модить их можно только из него.
+			class worldScriptModule
+			{
+				value = "";
+				files[] = { "DP_DBStorage_Server/scripts/4_World" };
+			};
 			// вызовы: сохранение/восстановление, self-test миссии.
 			class missionScriptModule
 			{
